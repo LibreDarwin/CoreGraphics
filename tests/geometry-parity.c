@@ -37,6 +37,15 @@ extern bool CGRectNearlyEqualToRect(CGRect, CGRect);
 extern bool CGRectNearlyEqualToRectWithTolerance(CGRect, CGRect, CGFloat);
 extern bool CGRectIsIntegral(CGRect);
 
+/* The affine SPI.  Like the NearlyEqual family above these are in the
+   SDK's .tbd, so the oracle can link and call them even though the public
+   headers never declare them. */
+extern bool CGAffineTransformIsSingular(const CGAffineTransform *);
+extern bool CGAffineTransformIsRectilinear(const CGAffineTransform *);
+extern CGAffineTransform CGAffineTransformMakeWithRect(CGRect);
+extern bool CGAffineTransformDecompose_SPI(CGAffineTransform, CGSize *,
+    CGFloat *, bool *, CGVector *);
+
 static void p(const char *label, CGFloat v)
 {
     printf("%s %a\n", label, (double)v);
@@ -56,6 +65,11 @@ static void pt(const char *label, CGPoint v)
 static void sz(const char *label, CGSize v)
 {
     printf("%s %a %a\n", label, (double)v.width, (double)v.height);
+}
+
+static void vec(const char *label, CGVector v)
+{
+    printf("%s %a %a\n", label, (double)v.dx, (double)v.dy);
 }
 
 static void b(const char *label, int v)
@@ -264,6 +278,107 @@ int main(void)
                 char l[64];
                 snprintf(l, sizeof l, "teq/%zu/%zu", i, j);
                 b(l, CGAffineTransformEqualToTransform(ts[i], ts[j]));
+            }
+        }
+    }
+
+    /* The affine SPI.
+
+       The IsSingular fixtures deliberately include a transform whose
+       determinant is 1 - 2^-54: that product is inexact and rounds to 1,
+       so a separately rounded a*d - b*c comes out exactly 0 and reports
+       the matrix singular, while the fused form keeps the -2^-54 and does
+       not.  The two spellings therefore disagree on this one input, which
+       is what makes the case worth having. */
+    {
+        CGAffineTransform ats[] = {
+            CGAffineTransformMake(1, 2, 3, 4, 5, 6),
+            CGAffineTransformMake(0, 1, 0, 0, 0, 0),   /* a*d - b*c == 0 */
+            CGAffineTransformMake(0, 0, 0, 0, 0, 0),   /* all zero */
+            CGAffineTransformMake(1, 0, 0, 1, 0, 0),   /* identity */
+            CGAffineTransformMake(1 + 0x1p-27, 1, 1, 1 - 0x1p-27, 0, 0),
+            CGAffineTransformMake(1e200, 1e200, 1e200, 1e200, 0, 0),
+            CGAffineTransformMake(1e-200, 1e-200, 1e-200, 1e-200, 0, 0),
+            CGAffineTransformMake(0, 0, 0, 1, 0, 0),   /* rectilinear: b == c == 0 */
+            CGAffineTransformMake(1, 0, 0, 0, 0, 0),   /* rectilinear: b == c == 0 */
+            CGAffineTransformMake(0, 1, 0, 1, 0, 0),   /* a == 0 but d != 0 */
+            CGAffineTransformMake(1, -0.0, -0.0, 1, 5, 6),
+            CGAffineTransformMake(-0.0, 1, 1, -0.0, 0, 0),
+            CGAffineTransformMake(0, 0, 0, 0, 9, 9),   /* translation only */
+        };
+        const size_t na = sizeof ats / sizeof ats[0];
+        char l[64];
+
+        for (size_t i = 0; i < na; i++) {
+            snprintf(l, sizeof l, "spi/singular/%zu", i);
+            b(l, CGAffineTransformIsSingular(&ats[i]));
+            snprintf(l, sizeof l, "spi/rectilinear/%zu", i);
+            b(l, CGAffineTransformIsRectilinear(&ats[i]));
+        }
+
+        /* CGAffineTransformMakeWithRect.  The three branches are: both
+           sides non-negative; a negative side with a finite origin; and a
+           negative side with an infinite origin.  The fourth fixture pins
+           that the infinite-origin collapse is only reached *with* a
+           negative side -- with both sides non-negative an infinite origin
+           is carried through untouched. */
+        {
+            static const CGRect mwr[] = {
+                { { 0, 0 }, { 1, 1 } },
+                { { 1, 2 }, { 3, 4 } },
+                { { 5, 5 }, { -4, -4 } },          /* both sides negative */
+                { { 0, 0 }, { -1, 1 } },           /* width negative only */
+                { { 0, 0 }, { 1, -1 } },           /* height negative only */
+                { { -0.0, -0.0 }, { 1, 1 } },
+                { { 0, 0 }, { -0.0, 1 } },         /* -0.0 is not < 0 */
+                { { 0, 0 }, { 1, -0.0 } },
+                { { 0, 0 }, { 0x1p-1074, 1 } },    /* smallest subnormal */
+                { { INFINITY, INFINITY }, { -1, -1 } },
+                { { INFINITY, 0 }, { -1, 1 } },    /* only origin.x infinite */
+                { { 0, INFINITY }, { 1, -1 } },    /* only origin.y infinite */
+                { { INFINITY, INFINITY }, { 1, 1 } },
+                { { -INFINITY, 0 }, { 1, 1 } },    /* -inf is not +inf */
+                { { 0, 0 }, { 0, 0 } },
+            };
+            const size_t nm = sizeof mwr / sizeof mwr[0];
+
+            for (size_t i = 0; i < nm; i++) {
+                snprintf(l, sizeof l, "spi/makerec/%zu", i);
+                tr(l, CGAffineTransformMakeWithRect(mwr[i]));
+            }
+        }
+
+        /* CGAffineTransformDecompose_SPI, including the NULL out-parameter
+           cases and the return value's 2^-46 shear threshold. */
+        {
+            CGAffineTransform dts[] = {
+                CGAffineTransformIdentity,
+                CGAffineTransformMake(2, 0, 0, 3, 0, 0),
+                CGAffineTransformMake(-2, 0, 0, 3, 0, 0),  /* negative scale */
+                CGAffineTransformMake(0, 0, 0, 1, 0, 0),
+                CGAffineTransformMakeRotation(0.75),
+                CGAffineTransformMake(1, 2, 3, 4, 5, 6),
+            };
+            const size_t nd = sizeof dts / sizeof dts[0];
+
+            for (size_t i = 0; i < nd; i++) {
+                CGSize sc = { 0, 0 };
+                CGFloat rot = 0;
+                bool neg = false;
+                CGVector trv = { 0, 0 };
+
+                snprintf(l, sizeof l, "spi/dspi/ret/%zu", i);
+                b(l, CGAffineTransformDecompose_SPI(dts[i], &sc, &rot, &neg,
+                    &trv));
+                snprintf(l, sizeof l, "spi/dspi/scale/%zu", i); sz(l, sc);
+                snprintf(l, sizeof l, "spi/dspi/rot/%zu", i); p(l, rot);
+                snprintf(l, sizeof l, "spi/dspi/neg/%zu", i); b(l, neg);
+                snprintf(l, sizeof l, "spi/dspi/trans/%zu", i); vec(l, trv);
+
+                /* Every out parameter optional. */
+                snprintf(l, sizeof l, "spi/dspi/allnull/%zu", i);
+                b(l, CGAffineTransformDecompose_SPI(dts[i], NULL, NULL, NULL,
+                    NULL));
             }
         }
     }

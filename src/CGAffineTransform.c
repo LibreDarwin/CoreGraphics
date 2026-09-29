@@ -12,9 +12,27 @@
      - CGAffineTransformIsIdentity is a componentwise comparison against
        the identity.
 
-   CGAffineTransformDecompose needs the same algorithm as QuartzCore's
-   CATransform3D decomposition, so it is not wired up here yet; it lands
-   with the QuartzCore work. */
+     - CGAffineTransformIsSingular tests a zero determinant computed as
+       one fused multiply-add, not as a separately rounded a*d - b*c.
+
+     - CGAffineTransformMakeWithRect builds the unit-square mapping, but
+       treats a negative side as a signal to flip rather than as an error:
+       the scale becomes the absolute size and the origin moves back by
+       the negative extent.  A negative side combined with an infinite
+       origin collapses the transform to zero scale about an infinite
+       translation.
+
+   CGAffineTransformDecompose is implemented but does not yet agree with
+   Apple, and CGAffineTransformDecompose_SPI is the only way to observe the
+   difference, so the SPI is built on top of a known-divergent payload.  We
+   read the x scale off the first column of the linear block, hypot(a, c),
+   and let the rotation absorb the sign via atan2(c, a).  Apple reads it off
+   the first row, -hypot(a, b) for a negative scale, which is what its
+   outScaleIsNegative flag reports, and normalises the rotation to a
+   positive range.  Matching it needs QuartzCore's CATransform3D
+   decomposition algorithm, so it lands with the QuartzCore work; until then
+   tests/geometry-parity.sh allowlists the SPI's payload labels and gates the
+   wrapper's own behaviour.  See local/disasm/analysis/REPORT.md. */
 
 #include "CGAffineTransform.h"
 #include "CGInternal.h"
@@ -170,6 +188,88 @@ CGAffineTransformInvert(CGAffineTransform t)
     inv.ty = (t.b * t.tx - t.a * t.ty) / det;
 
     return inv;
+}
+
+bool
+CGAffineTransformIsSingular(const CGAffineTransform *t)
+{
+    /* The determinant is evaluated as a single fused operation.  The
+       original negates the b*c product first (fnmul) and then folds it
+       into one fused multiply-add of a*d, so the whole expression rounds
+       once, with a*d never rounded on its own.  Spelling that out with
+       fma() is what keeps the result bit-exact; computing a*d - b*c
+       naively rounds the a*d product separately and can differ by an ulp,
+       which would put the == 0 test on the wrong side of the boundary. */
+    return fma(t->a, t->d, -(t->b * t->c)) == 0.0;
+}
+
+bool
+CGAffineTransformIsRectilinear(const CGAffineTransform *t)
+{
+    /* Either diagonal of the 2x2 block is entirely zero.  Both comparisons
+       are against zero, so -0.0 counts as zero here, and the test is
+       independent of the translation. */
+    return (t->b == 0.0 && t->c == 0.0) || (t->a == 0.0 && t->d == 0.0);
+}
+
+CGAffineTransform
+CGAffineTransformMakeWithRect(CGRect rect)
+{
+    const CGFloat w = rect.size.width;
+    const CGFloat h = rect.size.height;
+    CGAffineTransform t;
+
+    t.b = 0;
+    t.c = 0;
+
+    if (w < 0.0 || h < 0.0) {
+        /* A rect with a negative side is not the rect the caller drew, so
+           the transform is built from the absolute size and the origin is
+           pulled back by whichever side was negative.  When the origin is
+           itself infinite the whole thing collapses to a zero scale about
+           an infinite translation -- the null rect's transform, and what
+           makes CGRectNull round-trip.  Note the +infinity test is an
+           equality, so a NaN origin falls through to the finite branch and
+           a -infinity origin does too. */
+        if (rect.origin.x == INFINITY || rect.origin.y == INFINITY) {
+            t.a = 0;
+            t.d = 0;
+            t.tx = INFINITY;
+            t.ty = INFINITY;
+        } else {
+            t.a = fabs(w);
+            t.d = fabs(h);
+            /* min(x, 0) rather than a bare conditional: it keeps -0.0
+               distinct from 0.0 and suppresses NaN, and the original uses
+               the instruction that does exactly this. */
+            t.tx = rect.origin.x + fmin(w, 0.0);
+            t.ty = rect.origin.y + fmin(h, 0.0);
+        }
+    } else {
+        t.a = w;
+        t.d = h;
+        t.tx = rect.origin.x;
+        t.ty = rect.origin.y;
+    }
+
+    return t;
+}
+
+bool
+CGAffineTransformDecompose_SPI(CGAffineTransform t, CGSize *outScale,
+    CGFloat *outRotation, bool *outScaleIsNegative, CGVector *outTranslation)
+{
+    const CGAffineTransformComponents c = CGAffineTransformDecompose(t);
+
+    if (outScale) *outScale = c.scale;
+    if (outRotation) *outRotation = c.rotation;
+    if (outScaleIsNegative) *outScaleIsNegative = c.scale.width < 0.0;
+    if (outTranslation) *outTranslation = c.translation;
+
+    /* 2^-46: the shear is reported as absent below this magnitude, and the
+       comparison is against the magnitude, so a negative shear is treated
+       the same as a positive one.  An unordered comparison is false. */
+    return fabs(c.horizontalShear) < 0x1p-46;
 }
 
 CGAffineTransform

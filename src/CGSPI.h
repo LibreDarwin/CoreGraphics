@@ -67,6 +67,33 @@ CG_EXTERN bool CGRectIsIntegral(CGRect rect);
 CG_EXTERN_PRIVATE CGRect CGRectUprightBoundsForRotation(CGRect rect,
     CGRectEdge edge);
 
+/* True if the 2x2 part of *t has a zero determinant.  Like the inverse
+   helpers below, this takes the transform by POINTER: the disassembly
+   loads a and d from [x0] and [x0, #0x18], which is also what the arm64
+   ABI does for a 48-byte struct passed by value, so the two forms are
+   indistinguishable at the ABI level and the pointer form is used here
+   for consistency with the rest of this header. */
+CG_EXTERN bool CGAffineTransformIsSingular(const CGAffineTransform *t);
+
+/* True if the linear part is a pure scale, i.e. one of the two diagonals
+   of the 2x2 block is entirely zero.  Rectilinear transforms are the ones
+   whose inverse maps rectangles to rectangles rather than to parallelograms. */
+CG_EXTERN bool CGAffineTransformIsRectilinear(const CGAffineTransform *t);
+
+/* Build the transform mapping the unit square onto `rect'.  The rect is
+   passed in the four vector registers as a homogeneous float aggregate,
+   and the result comes back through the hidden return pointer, so the
+   by-value signature below is the one that matches. */
+CG_EXTERN CGAffineTransform CGAffineTransformMakeWithRect(CGRect rect);
+
+/* Decompose `t' through the out parameters instead of returning a
+   CGAffineTransformComponents by value.  Every out parameter may be NULL.
+   The return value reports whether the shear is negligible, i.e. whether
+   fabs(horizontalShear) < 2^-46. */
+CG_EXTERN bool CGAffineTransformDecompose_SPI(CGAffineTransform t,
+    CGSize *outScale, CGFloat *outRotation, bool *outScaleIsNegative,
+    CGVector *outTranslation);
+
 /* Apply the inverse of *t to point.
 
    Unlike CGAffineTransformInvert, which returns the identity transform on
