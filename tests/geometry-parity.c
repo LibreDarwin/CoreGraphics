@@ -83,6 +83,13 @@ static void tr(const char *label, CGAffineTransform t)
         (double)t.c, (double)t.d, (double)t.tx, (double)t.ty);
 }
 
+static void comp(const char *label, CGAffineTransformComponents v)
+{
+    printf("%s %a %a %a %a %a %a\n", label, (double)v.scale.width,
+        (double)v.scale.height, (double)v.horizontalShear, (double)v.rotation,
+        (double)v.translation.dx, (double)v.translation.dy);
+}
+
 /* A spread of rects, including the degenerate cases where the
    null/infinite sentinels and the empty-vs-null distinction matter. */
 static const CGRect rects[] = {
@@ -379,6 +386,88 @@ int main(void)
                 snprintf(l, sizeof l, "spi/dspi/allnull/%zu", i);
                 b(l, CGAffineTransformDecompose_SPI(dts[i], NULL, NULL, NULL,
                     NULL));
+            }
+        }
+
+        /* CGAffineTransformDecompose itself.  This used to be reachable only
+           through the SPI above, which is why its payload carried an
+           allowlist entry; it is public, so it is compared here directly and
+           on its own.
+
+           The cases past the first six are the corners the disassembly
+           transcription in src/CGAffineTransform.c turns on, each of which
+           pins a specific instruction rather than just a numeric value:
+
+             - a zero first row, so angle is atan2(0, 0) and the raw height
+               is a signed zero.  The branch tests the height's sign bit, so
+               this is where a `height < 0` comparison goes wrong and
+               reports a rotation a full pi away.
+             - a == 0 and b == 0 with the other row set, so angle is +-pi/2
+               and cos(angle) is the inexact 6.12e-17 rather than 0.  This is
+               what makes the width pick a/Y over b/X.
+             - exactly singular rows, where the shear guard fires and the
+               shear is reported as 0 rather than a division by 0.
+             - a near-singular pair, where the shear is enormous and so is
+               the last bit of it.
+             - negative and positive scales of equal size, whose rotations
+               differ by pi and whose widths differ only in sign.
+             - a translation, which is copied through unrotated. */
+        {
+            CGAffineTransform dcs[] = {
+                CGAffineTransformIdentity,
+                CGAffineTransformMake(2, 0, 0, 3, 0, 0),
+                CGAffineTransformMake(-2, 0, 0, 3, 0, 0),
+                CGAffineTransformMake(0, 0, 0, 1, 0, 0),
+                CGAffineTransformMakeRotation(0.75),
+                CGAffineTransformMake(1, 2, 3, 4, 5, 6),
+
+                /* zero first row: signed-zero height */
+                CGAffineTransformMake(0, 0, 0, 0, 0, 0),
+                CGAffineTransformMake(0, 0, 1, 0, 0, 0),
+                CGAffineTransformMake(0, 0, -1, 0, 0, 0),
+                CGAffineTransformMake(0, 0, 0, -1, 0, 0),
+                CGAffineTransformMake(0, 0, 0, 1, 0, 0),
+
+                /* a == 0: angle is +-pi/2, cos(angle) is 6.12e-17 */
+                CGAffineTransformMake(0, 1, 0, 0, 0, 0),
+                CGAffineTransformMake(0, 1, 1, 1, 0, 0),
+                CGAffineTransformMake(0, 1, 1, -1, 0, 0),
+                CGAffineTransformMake(0, -1, 1, 1, 0, 0),
+                CGAffineTransformMake(0, 1, -1, 1, 0, 0),
+
+                /* b == 0: angle is 0 or +-pi */
+                CGAffineTransformMake(1, 0, 0, 1, 0, 0),
+                CGAffineTransformMake(-1, 0, 0, 1, 0, 0),
+                CGAffineTransformMake(1, 0, 0, -1, 0, 0),
+                CGAffineTransformMake(-1, 0, 1, 0, 0, 0),
+
+                /* exactly singular: the shear guard fires */
+                CGAffineTransformMake(1, 2, 2, 4, 0, 0),
+                CGAffineTransformMake(1, -1, 1, -1, 0, 0),
+                CGAffineTransformMake(0.5, 0.25, 1, 0.5, 0, 0),
+
+                /* near-singular: huge shear */
+                CGAffineTransformMake(1, 1, 1, 1 + 0x1p-52, 0, 0),
+                CGAffineTransformMake(1, 1, 1, 1 - 0x1p-52, 0, 0),
+
+                /* equal and opposite scales: rotation differs by pi */
+                CGAffineTransformMake(3, 0, 0, 3, 0, 0),
+                CGAffineTransformMake(-3, 0, 0, 3, 0, 0),
+                CGAffineTransformMake(3, 0, 0, -3, 0, 0),
+                CGAffineTransformMake(-3, 0, 0, -3, 0, 0),
+
+                /* translation passes through unrotated */
+                CGAffineTransformMake(1, 0, 0, 1, 5, 6),
+                CGAffineTransformMake(0, 1, -1, 0, 5, 6),
+                CGAffineTransformMake(-2, 0, 0, 3, -7, 8),
+                CGAffineTransformMakeRotation(0.75),
+                CGAffineTransformMakeScale(-2, 3),
+            };
+            const size_t ndc = sizeof dcs / sizeof dcs[0];
+
+            for (size_t i = 0; i < ndc; i++) {
+                snprintf(l, sizeof l, "decompose/all/%zu", i);
+                comp(l, CGAffineTransformDecompose(dcs[i]));
             }
         }
     }

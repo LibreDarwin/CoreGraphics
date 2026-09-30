@@ -22,17 +22,12 @@
        origin collapses the transform to zero scale about an infinite
        translation.
 
-   CGAffineTransformDecompose is implemented but does not yet agree with
-   Apple, and CGAffineTransformDecompose_SPI is the only way to observe the
-   difference, so the SPI is built on top of a known-divergent payload.  We
-   read the x scale off the first column of the linear block, hypot(a, c),
-   and let the rotation absorb the sign via atan2(c, a).  Apple reads it off
-   the first row, -hypot(a, b) for a negative scale, which is what its
-   outScaleIsNegative flag reports, and normalises the rotation to a
-   positive range.  Matching it needs QuartzCore's CATransform3D
-   decomposition algorithm, so it lands with the QuartzCore work; until then
-   tests/geometry-parity.sh allowlists the SPI's payload labels and gates the
-   wrapper's own behaviour.  See local/disasm/analysis/REPORT.md. */
+   CGAffineTransformDecompose now agrees with Apple bit for bit, and is
+   documented where it is defined.  It was previously built on a different
+   decomposition convention and reached the public ABI only indirectly,
+   through CGAffineTransformDecompose_SPI, whose payload labels
+   tests/geometry-parity.sh allowlisted while the SPI itself was gated.  That
+   allowlist is gone.  See local/disasm/analysis/REPORT.md. */
 
 #include "CGAffineTransform.h"
 #include "CGInternal.h"
@@ -132,34 +127,116 @@ CGAffineTransformConcat(CGAffineTransform t1, CGAffineTransform t2)
    Decompose inverts that.  Note this recovers a canonical decomposition
    only: the transform does not record which steps produced it. */
 
+/* pi as a double, spelled out so the value cannot drift with the platform's
+   M_PI.  0x400921FB54442D18 is the correctly rounded nearest double to pi. */
+static const CGFloat CGAffineTransformPi = 0x1.921fb54442d18p+1;
+
+/* Apple decomposes from the first ROW of the linear block, not the first
+   column, and keeps the sign of that row's length in scale.width -- which is
+   exactly what CGAffineTransformDecompose_SPI's outScaleIsNegative reports --
+   rather than folding the sign into the rotation.  The algorithm below is
+   transcribed from _CGAffineTransformDecompose at 0x187431854, argument by
+   argument; the shape of it is worth stating because the obvious spelling is
+   wrong in three separate ways.
+
+   With angle = atan2(b, a) and the unit vector
+
+       X = -sin(angle) = -b/hypot(a, b)
+       Y = -cos(angle) = -a/hypot(a, b)
+
+   the raw width is whichever of b/X, a/Y divides by the larger magnitude, the
+   raw height is fma(d, Y, -(X * c)) = -det/hypot(a, b), and the shear is
+   fma(c, Y, X * d)/height.  The width and height are then negated together
+   when the raw height's sign bit is set, which is what normalises the width
+   to a positive number for det > 0 and leaves it at -hypot(a, b) otherwise.
+   Note that the rotation takes its second form on the *same* sign-bit test,
+   so the two branches differ by exactly pi: one reports `angle`, the other
+   `angle - copysign(pi, angle)`, and the copysign is what keeps the result
+   inside [-pi, pi] instead of running off the end.  An earlier reading had
+   this as atan2(b, a) with a wrap, which matched neither: the wrap is 20%
+   wrong and atan2(-b, -a) is 50% wrong, because both are off by an ulp from
+   what the sign-select actually produces.
+
+   Four details are load-bearing at the last bit.  None of them is
+   discoverable by reading the arithmetic -- each one is a choice between
+   spellings that agree to within an ulp everywhere except in a corner, and
+   the corners are the whole difficulty.  The disassembly settles three of
+   them and the oracle settles the fourth:
+
+     - the branch is "height is not positive", `height > 0` being the test
+       that is negated, NOT a comparison against zero and not a sign-bit
+       test.  All three of those differ, and only this spelling is right:
+       across 2.1 million cases `height < 0` mispredicts the branch about a
+       thousand times and `signbit(height)` about seven hundred, every one of
+       them a signed zero.  A zero first row makes the height a signed zero
+       often enough that this matters, and getting it wrong reports a
+       rotation a full pi away, which is a much bigger error than the one
+       bit it looks like.
+
+     - the height is a single fused multiply-add, -(X * c) being the rounded
+       product negated.  A separate multiply and subtract diverges in the
+       cancellation-sensitive cases, which is most of what the degenerate
+       grid exercises.
+
+     - where the branch does flip the sign, it folds the flip into the
+       multiply-add's operands -- `fma(-d, Y, X * c)` -- instead of negating
+       the result it already computed.  The two agree except when the
+       height is a zero, and then the operand form is the one that reports
+       +0 where negating a computed +0 would report -0.
+
+     - the shear is guarded on `height == 0 || isnan(height)` and not on a
+       magnitude, so a height that is an infinity still divides.  It is also
+       spelled with the un-negated sin and cos over a negated height; see
+       the note at the division itself.
+
+
+   The translation is copied verbatim.  Apple does NOT un-rotate it, so
+   neither do we, and the "undo the rotation that R.T applied" step that used
+   to live here was simply wrong. */
 CGAffineTransformComponents
 CGAffineTransformDecompose(CGAffineTransform transform)
 {
     CGAffineTransformComponents c;
+    const CGFloat angle = atan2(transform.b, transform.a);
+    const CGFloat X = -sin(angle);
+    const CGFloat Y = -cos(angle);
 
-    const CGFloat t = atan2(transform.c, transform.a);
-    const CGFloat s = sin(t);
-    const CGFloat co = cos(t);
+    CGFloat width = fabs(Y) < fabs(X) ? transform.b / X : transform.a / Y;
+    CGFloat rawHeight = fma(transform.d, Y, -(X * transform.c));
 
-    c.scale.width = hypot(transform.a, transform.c);
-    c.scale.height = transform.d * co - transform.b * s;
-    c.horizontalShear = c.scale.height != 0
-        ? (transform.b * co + transform.d * s) / c.scale.height
-        : 0;
-    c.rotation = t;
+    /* The shear is the ratio of the two cross products, and Apple spells
+       both of them with the UN-negated sin and cos while dividing by a
+       negated height.  That is the same number twice over -- negating a
+       numerator and a denominator cancels -- so the only place it can be
+       observed is a zero, and there it is the whole answer.  Writing it the
+       other way round, with the negated X and Y the rest of the routine
+       uses, reports a +0 where Apple reports a -0 for a zero first row with
+       a zero shear. */
+    c.horizontalShear = (rawHeight == 0.0 || isnan(rawHeight))
+        ? 0.0
+        : fma(transform.c, cos(angle), sin(angle) * transform.d) / -rawHeight;
 
-    /* Undo the rotation that R.T applied to the translation. */
-    if (c.scale.width != 0 && c.scale.height != 0) {
-        const CGFloat p = transform.tx / c.scale.width;
-        const CGFloat q = transform.ty / c.scale.height
-            - c.horizontalShear * p;
+    /* "Not positive", so a signed zero takes this branch. */
+    const int negative = !(rawHeight > 0.0);
 
-        c.translation.dx = co * p - s * q;
-        c.translation.dy = s * p + co * q;
-    } else {
-        c.translation.dx = transform.tx;
-        c.translation.dy = transform.ty;
+    c.rotation = negative
+        ? angle
+        : angle - copysign(CGAffineTransformPi, angle);
+
+    if (negative) {
+        width = -width;
     }
+
+    c.scale.width = width;
+    /* The sign flip is folded into the multiply-add's operands rather than
+       applied to the result.  For a zero height the two spellings disagree,
+       and the oracle wants the operand form: negating a computed +0 would
+       report -0, where the fma of two zeros can report +0. */
+    c.scale.height = negative
+        ? fma(-transform.d, Y, X * transform.c)
+        : rawHeight;
+    c.translation.dx = transform.tx;
+    c.translation.dy = transform.ty;
 
     return c;
 }
