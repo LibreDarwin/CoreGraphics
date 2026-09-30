@@ -25,7 +25,10 @@ CONFIG=${CONFIG:-release}
 FW=$top/build/$CONFIG/CoreGraphics.framework
 
 SDK=${SDK:-/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk}
-CC=${CC:-/Users/sunneva/xnuports-root/devel/xcode-tools/build/release/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang}
+# Apple's Xcode toolchain, not the from-source tree under
+# xnuports-root/devel/xcode-tools: that one ships only the profiling
+# compiler runtimes and no libclang_rt.asan_* at all.
+CC=${CC:-/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang}
 
 [ -d "$FW" ] || { echo "missing $FW -- run make first" >&2; exit 1; }
 
@@ -37,12 +40,23 @@ ln -sfn "$top/src" "$top/build/$CONFIG/include/CoreGraphics"
 out=${TMPDIR:-/tmp}/cg-parity.$$
 mkdir -p "$out"
 
+# Under CONFIG=asan the framework is instrumented, but the fixture that
+# calls into it is not, so the interesting half of the work would go
+# unchecked.  Mirror the config's sanitizer flags onto the fixture too and
+# make UBSan fatal, so a divergence shows up as a crash rather than as a
+# "runtime error:" line on stderr that scrolls past the transcript
+# comparison.  SAN is empty for every other config.
+case $CONFIG in
+    asan) SAN="-fsanitize=address,undefined -fno-sanitize-recover=all" ;;
+    *)    SAN="" ;;
+esac
+
 # $1 = output binary, rest = extra flags
 build() {
     _bin=$1; shift
     # shellcheck disable=SC2086
     $CC -O1 -std=c11 -D_DARWIN_C_SOURCE -mmacosx-version-min=26.5 \
-        -isysroot "$SDK" -Wall -Wextra \
+        -isysroot "$SDK" -Wall -Wextra $SAN \
         -o "$_bin" "$here/geometry-parity.c" \
         -framework CoreGraphics -framework CoreFoundation "$@"
 }
