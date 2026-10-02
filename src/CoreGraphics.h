@@ -9,5 +9,6 @@
 #include <CoreGraphics/CGBase.h>
 #include <CoreGraphics/CGGeometry.h>
 #include <CoreGraphics/CGAffineTransform.h>
+#include <CoreGraphics/CGColorSpace.h>
 
 #endif /* COREGRAPHICS_H_ */

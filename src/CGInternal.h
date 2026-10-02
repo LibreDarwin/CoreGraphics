@@ -35,6 +35,11 @@ CG_BEGIN_DECLS
 void CGPostError(const char *format, ...) CG_PRINTF_FUNCTION(1, 2)
     CG_PRIVATE;
 
+/* The MD5 of `len' bytes at `data', written as 16 bytes to `out'.  Used only
+   for the ICC profile ID, which is the MD5 of the profile with its flags and
+   ID fields zeroed; see CGMD5.c. */
+void CGMD5(const void *data, size_t len, unsigned char out[16]) CG_PRIVATE;
+
 CG_END_DECLS
 
 #endif /* CGINTERNAL_H_ */
