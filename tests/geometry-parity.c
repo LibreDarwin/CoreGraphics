@@ -23,6 +23,7 @@
 #include <CoreFoundation/CFString.h>
 #include <CoreGraphics/CoreGraphics.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* CoreGraphics SPI that is exported by the framework but absent from the
@@ -150,10 +151,19 @@ static void cfstr(const char *label, CFStringRef v)
 
    The ID is reported separately because it is the one field that is *not*
    independent: it is the MD5 of the finished profile, so it confirms the
-   digest was computed over the same bytes rather than a stale copy. */
-static void icc(const char *label, CFDataRef d)
+   digest was computed over the same bytes rather than a stale copy.
+
+   `mask_date' zeroes header bytes 24-35, the six big-endian 16-bit fields
+   of the creation date, before hashing.  Lab stamps the local time of the
+   call there instead of a constant, so two runs of the oracle seconds apart
+   differ; without the mask the harness would report that clock skew as a
+   synthesis difference and could never be a gate.  Every other byte is
+   still compared, and the date is the only field any calibrated profile
+   here leaves live. */
+static void icc_impl(const char *label, CFDataRef d, int mask_date)
 {
     unsigned char md[CC_MD5_DIGEST_LENGTH];
+    unsigned char *tmp = NULL;
     const unsigned char *p;
     CFIndex len;
 
@@ -163,6 +173,16 @@ static void icc(const char *label, CFDataRef d)
     }
     p = CFDataGetBytePtr(d);
     len = CFDataGetLength(d);
+    if (mask_date && len >= 36) {
+        tmp = malloc((size_t)len);
+        if (tmp) {
+            memcpy(tmp, p, (size_t)len);
+            memset(tmp + 24, 0, 12);
+            p = tmp;
+        } else {
+            mask_date = 0;
+        }
+    }
     /* MD5 because that is the algorithm the ICC profile ID is defined in
        terms of, so a mismatch here and a mismatch there mean the same thing.
        This is a comparison key for a test, not a security decision. */
@@ -174,7 +194,10 @@ static void icc(const char *label, CFDataRef d)
     for (int i = 0; i < CC_MD5_DIGEST_LENGTH; i++) printf("%02x", md[i]);
     /* The profile ID is the 16 bytes at 84, and it is the last of the four
        regions that vary, so printing it catches a template that is right
-       everywhere else. */
+       everywhere else.  For Lab it is deliberately all zeros: Apple leaves
+       that field zero here rather than filling in the MD5, unlike the gray
+       and RGB templates, so a zero here is the expected result and not a
+       missing digest. */
     printf(" id=");
     if (len >= 100) {
         for (int i = 0; i < 16; i++) printf("%02x", p[84 + i]);
@@ -189,6 +212,17 @@ static void icc(const char *label, CFDataRef d)
         (unsigned)(((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
             ((uint32_t)p[2] << 8) | p[3]),
         len >= 40 ? (const char *)(p + 36) : "");
+    free(tmp);
+}
+
+static void icc(const char *label, CFDataRef d)
+{
+    icc_impl(label, d, 0);
+}
+
+static void icc_live_date(const char *label, CFDataRef d)
+{
+    icc_impl(label, d, 1);
 }
 
 /* A spread of rects, including the degenerate cases where the
@@ -1255,6 +1289,305 @@ int main(void)
                 b(l, CGColorSpaceCopyICCData(dev) == NULL);
                 if (cal) CGColorSpaceRelease(cal);
                 CGColorSpaceRelease(dev);
+            }
+        }
+
+        /* Lab.  This one has three rules the calibrated families above do
+           not have, and each has to be pinned by the whole profile:
+
+             - a white or black point survives only if a float can hold each
+               of its three coordinates exactly, and the two tags are gated
+               independently, so a rejected tag is stored as three zeros
+               while the other is still kept;
+             - because a rejected tag is indistinguishable from a tag the
+               caller passed as zero, the profile is 496 bytes when both
+               points end up zero -- which is also exactly the generic Lab
+               profile -- and 516 when they differ, since the two XYZ tags
+               can no longer share one block;
+             - the creation date is live, so these profiles are compared with
+               the date masked.
+
+           The cases are chosen so each rule has at least one case that would
+           fail if the rule were dropped. */
+        {
+            static const struct {
+                const char *name;
+                CGFloat wp[3], bp[3], range[4];
+                int has_bp, has_range;
+            } cases[] = {
+            /* (1,1,1) on both: every coordinate is float-exact, so the two
+               tags differ and the profile is the long one. */
+            { "unity", { 1.0, 1.0, 1.0 }, { 0.5, 0.25, 0.125 },
+              { 0, 0, 0, 0 }, 1, 0 },
+            /* A NULL black point is zero, which is what the case above has to
+               agree with, since that is the one thing that distinguishes the
+               caller's three pointers from the profile. */
+            { "unity_no_bp", { 1.0, 1.0, 1.0 }, { 0, 0, 0 },
+              { 0, 0, 0, 0 }, 0, 0 },
+            /* D65 and D50 both fail the float test, so each collapses onto
+               the generic Lab profile -- the common real-world case, and the
+               one a caller is most likely to be surprised by. */
+            { "d65", { 0.95047, 1.0, 1.08883 }, { 0.5, 0.25, 0.125 },
+              { 0, 0, 0, 0 }, 1, 0 },
+            { "d50std", { 0.9642, 1.0, 0.8249 }, { 0.5, 0.25, 0.125 },
+              { 0, 0, 0, 0 }, 1, 0 },
+            /* A white point of literal zeros PASSES the float test -- zero is
+               exactly representable -- and so does not collapse the profile:
+               it stores zeros and shares a block with the default black
+               point, which is the same 496 bytes as the generic profile for
+               a different reason.  This is the case that separates "fails the
+               test" from "is zero". */
+            { "wp_zero", { 0.0, 0.0, 0.0 }, { 0, 0, 0 },
+              { 0, 0, 0, 0 }, 0, 0 },
+            /* The independent gates: white point rejected, black point kept,
+               and the reverse.  Each is 516 bytes and neither is the generic
+               profile, so dropping the "independently" would show up here. */
+            { "wp_bad_bp_ok", { 0.5, 0.3, 0.125 }, { 0.5, 0.25, 0.125 },
+              { 0, 0, 0, 0 }, 1, 0 },
+            { "wp_ok_bp_bad", { 1.0, 1.0, 1.0 }, { 0.5, 0.3, 0.125 },
+              { 0, 0, 0, 0 }, 1, 0 },
+            { "both_bad", { 0.5, 0.3, 0.125 }, { 0.5, 0.7, 0.125 },
+              { 0, 0, 0, 0 }, 1, 0 },
+            /* (float)0.3 survives while a double 0.3 does not, because the
+               narrow value is exactly representable.  Without this pair the
+               harness could not tell "compares against float" from "compares
+               against double". */
+            { "f32_wp", { (CGFloat)(float)0.3, 1.0, 1.0 }, { 0.5, 0.25, 0.125 },
+              { 0, 0, 0, 0 }, 1, 0 },
+            { "f64_wp", { 0.3, 1.0, 1.0 }, { 0.5, 0.25, 0.125 },
+              { 0, 0, 0, 0 }, 1, 0 },
+            /* NaN fails the gate.  Infinities pass it, because a float holds
+               infinity exactly, and then saturate in the 16.16 encoding --
+               so this case pins the clamp from both sides. */
+            { "wp_nan", { 0.0 / 0.0, 1.0, 1.0 }, { 0.5, 0.25, 0.125 },
+              { 0, 0, 0, 0 }, 1, 0 },
+            { "wp_inf", { 1.0, 1.0 / 0.0, 1.0 }, { 0.5, 0.25, 0.125 },
+              { 0, 0, 0, 0 }, 1, 0 },
+            { "wp_neginf", { 1.0, 1.0, -1.0 / 0.0 }, { 0.5, 0.25, 0.125 },
+              { 0, 0, 0, 0 }, 1, 0 },
+            { "wp_big", { 40000.0, 1.0, 1.0 }, { 0.5, 0.25, 0.125 },
+              { 0, 0, 0, 0 }, 1, 0 },
+            { "wp_negbig", { -40000.0, 1.0, 1.0 }, { 0.5, 0.25, 0.125 },
+              { 0, 0, 0, 0 }, 1, 0 },
+            /* The rounding asymmetry: +0.5 and -0.5 quantise to different
+               magnitudes, because the scale rounds before it truncates. */
+            { "wp_half", { 0.5, 1.0, 1.0 }, { 0.5, 0.25, 0.125 },
+              { 0, 0, 0, 0 }, 1, 0 },
+            { "wp_neghalf", { -0.5, 1.0, 1.0 }, { 0.5, 0.25, 0.125 },
+              { 0, 0, 0, 0 }, 1, 0 },
+            { "wp_lsb", { 1.0 / 65536.0, 1.0, 1.0 }, { 0.5, 0.25, 0.125 },
+              { 0, 0, 0, 0 }, 1, 0 },
+            /* The range argument is accepted and ignored outright, so all
+               four of these have to produce the same profile as unity. */
+            { "range_ones", { 1.0, 1.0, 1.0 }, { 0.5, 0.25, 0.125 },
+              { 1.0, 1.0, 1.0, 1.0 }, 1, 1 },
+            { "range_signed", { 1.0, 1.0, 1.0 }, { 0.5, 0.25, 0.125 },
+              { -0.5, 0.5, -0.5, 0.5 }, 1, 1 },
+            { "range_huge", { 1.0, 1.0, 1.0 }, { 0.5, 0.25, 0.125 },
+              { 1e30, -1e30, 1e30, -1e30 }, 1, 1 },
+            { "range_nan", { 1.0, 1.0, 1.0 }, { 0.5, 0.25, 0.125 },
+              { 0.0 / 0.0, 1.0 / 0.0, -1.0 / 0.0, 0.0 / 0.0 }, 1, 1 },
+            };
+            size_t ncases = sizeof cases / sizeof cases[0];
+            static const CGFloat unity_wp[3] = { 1.0, 1.0, 1.0 };
+            static const CGFloat unity_bp[3] = { 0.5, 0.25, 0.125 };
+            static const CGFloat zero4[4] = { 0.0, 0.0, 0.0, 0.0 };
+
+            for (size_t i = 0; i < ncases; i++) {
+                CGColorSpaceRef c = CGColorSpaceCreateLab(
+                    cases[i].wp, cases[i].has_bp ? cases[i].bp : NULL,
+                    cases[i].has_range ? cases[i].range : NULL);
+                CFDataRef d;
+
+                snprintf(l, sizeof l, "lab/%s/non_null", cases[i].name);
+                b(l, c != NULL);
+                if (!c) continue;
+
+                snprintf(l, sizeof l, "lab/%s/model", cases[i].name);
+                n(l, (long long)CGColorSpaceGetModel(c));
+                snprintf(l, sizeof l, "lab/%s/ncomp", cases[i].name);
+                n(l, (long long)CGColorSpaceGetNumberOfComponents(c));
+                snprintf(l, sizeof l, "lab/%s/base_is_null", cases[i].name);
+                b(l, CGColorSpaceGetBaseColorSpace(c) == NULL);
+                snprintf(l, sizeof l, "lab/%s/name_is_null", cases[i].name);
+                b(l, CGColorSpaceCopyName(c) == NULL);
+                snprintf(l, sizeof l, "lab/%s/uncalibrated", cases[i].name);
+                b(l, CGColorSpaceIsUncalibrated(c));
+                snprintf(l, sizeof l, "lab/%s/iccCompatible", cases[i].name);
+                b(l, CGColorSpaceIsICCCompatible(c));
+                snprintf(l, sizeof l, "lab/%s/renderingIntent", cases[i].name);
+                n(l, (long long)CGColorSpaceGetRenderingIntent(c));
+
+                /* The whole profile with the live date masked.  This is the
+                   check that pins the tag table, the sharing and the
+                   quantisation at once. */
+                d = CGColorSpaceCopyICCData(c);
+                snprintf(l, sizeof l, "lab/%s/profile", cases[i].name);
+                icc_live_date(l, d);
+                if (d) CFRelease(d);
+
+                {
+                    CFDataRef c1 = CGColorSpaceCopyICCData(c);
+                    CFDataRef c2 = CGColorSpaceCopyICCData(c);
+                    snprintf(l, sizeof l, "lab/%s/copy_is_fresh", cases[i].name);
+                    b(l, c1 && c2 && CFDataGetBytePtr(c1) != CFDataGetBytePtr(c2));
+                    if (c1) CFRelease(c1);
+                    if (c2) CFRelease(c2);
+                }
+
+                /* Equality is on the profile, not on the arguments, so two
+                   calls that agree byte for byte have to compare equal even
+                   though the arguments differ. */
+                {
+                    CGColorSpaceRef c2 = CGColorSpaceCreateLab(
+                        cases[i].wp, cases[i].has_bp ? cases[i].bp : NULL,
+                        cases[i].has_range ? cases[i].range : NULL);
+                    snprintf(l, sizeof l, "lab/%s/self_eq", cases[i].name);
+                    b(l, CGColorSpaceEqualToColorSpace(c, c2));
+                    if (c2) CGColorSpaceRelease(c2);
+                }
+
+                CGColorSpaceRelease(c);
+            }
+
+            /* The collapsed cases are all the same 496 bytes: a rejected tag
+               is indistinguishable from a tag the caller passed as zero, so
+               every case whose two points both end up zero has to be equal to
+               every other one, whatever its arguments were.  This is checked
+               through the public surface -- equality plus the digest -- rather
+               than against CGColorSpaceCreateWithName(kCGColorSpaceGenericLab),
+               which Apple resolves to those same bytes but which is outside
+               this project's implemented surface. */
+            {
+                static const CGFloat d65[3] = { 0.95047, 1.0, 1.08883 };
+                static const CGFloat d50[3] = { 0.9642, 1.0, 0.8249 };
+                static const CGFloat wp_zero[3] = { 0.0, 0.0, 0.0 };
+                static const CGFloat wp_bad[3] = { 0.5, 0.3, 0.125 };
+                static const CGFloat wp_inf[3] = { 1.0, 1.0 / 0.0, 1.0 };
+                static const CGFloat bp_bad[3] = { 0.5, 0.7, 0.125 };
+                static const CGFloat *const collapse[][3] = {
+                    { unity_wp, unity_bp, NULL },
+                    { d65, unity_bp, NULL },
+                    { d50, unity_bp, NULL },
+                    { wp_zero, unity_bp, NULL },
+                    { wp_bad, bp_bad, NULL },
+                    { wp_inf, unity_bp, NULL },
+                };
+                static const char *const cnames[] = {
+                    "unity_wp", "d65", "d50", "wp_zero", "wp_bad", "wp_inf",
+                };
+                const size_t nc = sizeof collapse / sizeof collapse[0];
+                CGColorSpaceRef ref = CGColorSpaceCreateLab(collapse[0][0],
+                    collapse[0][1], collapse[0][2]);
+
+                for (size_t i = 0; i < nc; i++) {
+                    CGColorSpaceRef c = CGColorSpaceCreateLab(collapse[i][0],
+                        collapse[i][1], collapse[i][2]);
+                    CFDataRef dr = ref ? CGColorSpaceCopyICCData(ref) : NULL;
+                    CFDataRef dc = c ? CGColorSpaceCopyICCData(c) : NULL;
+                    int same = 0;
+
+                    if (dr && dc) {
+                        CFIndex m = CFDataGetLength(dr);
+
+                        same = 1;
+                        if (m != CFDataGetLength(dc)) {
+                            same = 0;
+                        } else {
+                            const unsigned char *a = CFDataGetBytePtr(dr);
+                            const unsigned char *bb = CFDataGetBytePtr(dc);
+
+                            /* Bytes 24-35 are the creation date, which is
+                               live here; everything else must match. */
+                            for (CFIndex k = 0; k < m; k++) {
+                                if (k >= 24 && k < 36) continue;
+                                if (a[k] != bb[k]) { same = 0; break; }
+                            }
+                        }
+                    }
+
+                    snprintf(l, sizeof l, "lab/collapse/%s/eq_ref", cnames[i]);
+                    b(l, c && CGColorSpaceEqualToColorSpace(c, ref));
+                    /* And the same bytes, not merely an equal space:
+                       equality could be decided on the arguments while the
+                       profiles differed, and these cases disagree about the
+                       arguments on purpose. */
+                    snprintf(l, sizeof l, "lab/collapse/%s/same_bytes", cnames[i]);
+                    b(l, same);
+                    if (dr) CFRelease(dr);
+                    if (dc) CFRelease(dc);
+                    if (c) CGColorSpaceRelease(c);
+                }
+                if (ref) CGColorSpaceRelease(ref);
+            }
+
+            /* The defaulting rules: NULL black point is zero, and a range of
+               all zeros is the same as no range at all. */
+            {
+                CGColorSpaceRef dflt = CGColorSpaceCreateLab(unity_wp, NULL, NULL);
+                CGColorSpaceRef expl = CGColorSpaceCreateLab(unity_wp, unity_bp,
+                    NULL);
+
+                snprintf(l, sizeof l, "lab/defaults/non_null");
+                b(l, dflt != NULL);
+                /* The explicit black point above is not zero, so these two
+                   must differ; the zero-range half is checked by comparing
+                   two spaces built the same way with and without it. */
+                snprintf(l, sizeof l, "lab/defaults/bp_matters");
+                b(l, !(dflt && CGColorSpaceEqualToColorSpace(dflt, expl)));
+                if (dflt) CGColorSpaceRelease(dflt);
+                if (expl) CGColorSpaceRelease(expl);
+            }
+            {
+                CGColorSpaceRef nr = CGColorSpaceCreateLab(unity_wp, unity_bp, NULL);
+                CGColorSpaceRef zr = CGColorSpaceCreateLab(unity_wp, unity_bp, zero4);
+
+                snprintf(l, sizeof l, "lab/defaults/range_ignored");
+                b(l, nr && CGColorSpaceEqualToColorSpace(nr, zr));
+                if (nr) CGColorSpaceRelease(nr);
+                if (zr) CGColorSpaceRelease(zr);
+            }
+
+            /* A NULL white point is deliberately NOT exercised here.  Apple
+               faults on it, so the oracle would die before printing anything
+               and there is no answer to compare against; the header marks the
+               argument non-null and our implementation returns NULL instead. */
+
+            /* A sweep over dyadic white points, which are all float-exact, so
+               every case here exercises the 16.16 encoding across its range
+               rather than the float gate.  Anything the quantiser rounds,
+               truncates or saturates differently shows up as a length or a
+               digest mismatch rather than as a plausible-looking profile. */
+            for (int i = -80; i <= 80; i++) {
+                CGFloat wp[3] = { (CGFloat)i / 64.0, 1.0, 1.0 };
+                CGColorSpaceRef c = CGColorSpaceCreateLab(wp, unity_bp, NULL);
+                CFDataRef d;
+
+                snprintf(l, sizeof l, "lab/sweep/dyadic_%d", i);
+                d = c ? CGColorSpaceCopyICCData(c) : NULL;
+                icc_live_date(l, d);
+                if (d) CFRelease(d);
+                if (c) CGColorSpaceRelease(c);
+            }
+
+            /* And a sweep over points that are mostly NOT float-exact, so the
+               gate is exercised across the whole set rather than at a handful
+               of hand-picked values. */
+            for (int i = 0; i < 64; i++) {
+                CGFloat wp[3], bp[3];
+                CGColorSpaceRef c;
+                CFDataRef d;
+
+                for (int k = 0; k < 3; k++) {
+                    wp[k] = (CGFloat)(0.1 * (double)(i + k * 17));
+                    bp[k] = (CGFloat)(0.5 * (double)(i - k * 7));
+                }
+                c = CGColorSpaceCreateLab(wp, bp, NULL);
+                snprintf(l, sizeof l, "lab/sweep/inexact_%d", i);
+                d = c ? CGColorSpaceCopyICCData(c) : NULL;
+                icc_live_date(l, d);
+                if (d) CFRelease(d);
+                if (c) CGColorSpaceRelease(c);
             }
         }
 

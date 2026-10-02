@@ -14,27 +14,28 @@
 
      - the three device spaces, which are immortal singletons,
      - pattern spaces, which are reference-counted and own their base,
+     - the calibrated spaces -- gray, RGB and Lab -- which synthesise their
+       ICC profile,
      - the accessors over those, and
      - the built-in name/ID table.
 
-   Deliberately absent, because each of these synthesizes or embeds a real
-   ICC profile and so needs a byte-exact ICC encoder that this step does
-   not have yet:
+   Deliberately absent, because each of these either embeds a profile this
+   step cannot reproduce or needs a byte-exact ICC encoder:
 
-     - CreateCalibratedGray, CreateCalibratedRGB, CreateLab,
-       CreateLinearized, CreateExtended and their Extended variants,
+     - CreateLinearized, CreateExtended and their Extended variants,
      - CreateICCBased, CreateWithICCData, CreateWithICCProfile,
        CreateWithColorSyncProfile, CreateWithURL, CreatePlatformProfile,
      - CreateWithName and CreateWithID for the 32 built-in non-device names,
        which resolve to the embedded profiles,
      - CreateIndexed, which for a 256-entry table returns NULL in Apple.
 
-   Probing Apple for the calibrated family shows why those are separate
-   work: Apple synthesizes an ICC profile on the fly and the profile size
-   varies with the shape of the request -- 380 bytes for a calibrated gray,
-   496 for a single-gamma calibrated RGB or a Lab, 512 for a three-gamma
-   calibrated RGB, and 1992 for a named space.  The model, component count
-   and name are the cheap part of that contract; CopyICCData is the rest. */
+   The three calibrated spaces do synthesise a profile, and the size varies
+   with the shape of the request: 380 bytes for a calibrated gray, 416 to 528
+   for a calibrated RGB depending on how many of its XYZ tags and tone curves
+   coincide, and 496 or 516 for a Lab depending on whether the white point
+   survives Apple's float check.  1992 is the size of a named space.  The
+   model, component count and name are the cheap part of that contract;
+   CopyICCData is the rest. */
 
 #ifndef CGCOLORSPACE_H_
 #define CGCOLORSPACE_H_
@@ -116,13 +117,39 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateCalibratedGray(const CGFl
    in that computation is quantised, so `whitePoint', `blackPoint', `gamma'
    and `matrix' are not recoverable from the profile.
 
-   A NULL `whitePoint' is rejected and the function returns NULL.  A white
+    A NULL `whitePoint' is rejected and the function returns NULL.  A white
    point of all zeros is accepted, and collapses the five colorant tags onto
    one shared block -- which also reorders the tag table, since Apple lists
    the tags that own a block ahead of the ones that share it. */
 CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateCalibratedRGB(const CGFloat
     whitePoint[CG_NONNULL_ARRAY 3], const CGFloat blackPoint[__nullable 3],
     const CGFloat gamma[__nullable 3], const CGFloat matrix[__nullable 9]);
+
+/* Create a CIE 1931 XYZ-based Lab color space carrying a synthesised ICC
+   profile.  `whitePoint' is the diffuse white point, `blackPoint' the diffuse
+   black point, defaulting to zero when NULL, and `range' the four
+   encoding ranges, defaulting to zero when NULL.
+
+   The profile is byte-for-byte identical to Apple's, with two exceptions a
+   caller has to know about.  The profile ID is left all zeros rather than
+   being an MD5, and the creation date is the local time of the call rather
+   than a constant, so two calls seconds apart differ in one byte and an exact
+   comparison has to mask header bytes 24-35.
+
+   A white point is kept only when each of its three coordinates is a value a
+   float can hold exactly; otherwise the whole tag is stored as zero.  D65 and
+   D50 both fail that test, so a space built from either is byte-for-byte the
+   generic Lab profile -- 496 bytes, identical to what
+   CGColorSpaceCreateWithName(kCGColorSpaceGenericLab) produces -- while
+   (0.5, 1, 1) survives and the profile grows to 516 bytes to give the black
+   point a block of its own.  `range' is accepted and has no effect on the
+   profile at all.
+
+   A NULL `whitePoint' is rejected and the function returns NULL; Apple faults
+   on that instead, so there is no behaviour to copy. */
+CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateLab(const CGFloat
+    whitePoint[CG_NONNULL_ARRAY 3], const CGFloat blackPoint[__nullable 3],
+    const CGFloat range[__nullable 4]);
 
 /* Return the CoreFoundation type identifier of a color space, which is 73.
    This is a constant in Apple's framework: every color space reports 73
@@ -132,7 +159,8 @@ CG_EXTERN CFTypeID CGColorSpaceGetTypeID(void);
 
 /* Return the space's model: kCGColorSpaceModelMonochrome for device gray,
    kCGColorSpaceModelRGB for device RGB, kCGColorSpaceModelCMYK for device
-   CMYK, and kCGColorSpaceModelPattern for a pattern space. */
+   CMYK, kCGColorSpaceModelLab for a Lab space, and kCGColorSpaceModelPattern
+   for a pattern space. */
 CG_EXTERN CGColorSpaceModel CGColorSpaceGetModel(CGColorSpaceRef cg_nullable space)
     CG_PURE;
 

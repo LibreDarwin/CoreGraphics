@@ -45,6 +45,7 @@
    are issued in, so fma is used deliberately rather than spelling out a
    multiply and an add and relying on the compiler to fuse them. */
 #include <math.h>
+#include <time.h>
 
 /* The CF class identifier every color space reports.  Read out of Apple by
    calling CGColorSpaceGetTypeID on a device gray, a device RGB, a device
@@ -55,12 +56,13 @@
 /* CGColorSpaceGetType's values.  This tag is finer-grained than
    CGColorSpaceModel: a pattern space reports 9 whatever its base says,
    which the model could not express.  Probed on all five spaces we
-   implement; the device spaces report 0, 1 and 2 in that order and both
-   pattern spaces report 9. */
+   implement; the device spaces report 0, 1 and 2 in that order, a Lab
+   space reports 5, and both pattern spaces report 9. */
 enum {
     CGColorSpaceTypeMonochrome = 0,
     CGColorSpaceTypeRGB = 1,
     CGColorSpaceTypeCMYK = 2,
+    CGColorSpaceTypeLab = 5,
     CGColorSpaceTypePattern = 9
 };
 
@@ -88,6 +90,14 @@ struct CGColorSpace {
        reports for them. */
     unsigned char *profile;
     size_t profileLen;
+    /* A Lab space's output range, and whether the caller supplied one.  Apple
+       keeps this beside the profile rather than inside it: two spaces with
+       byte-identical profiles are reported unequal when one was built with a
+       range and the other was not.  A NULL range is not a range of zeros but
+       the absence of one, which is why the flag is needed to tell them
+       apart. */
+    bool hasRange;
+    CGFloat range[4];
 };
 
 
@@ -99,17 +109,17 @@ struct CGColorSpace {
    "Device RGB". */
 static struct CGColorSpace CGColorSpaceDeviceGrayState = {
     0, true, kCGColorSpaceModelMonochrome, CGColorSpaceTypeMonochrome, 1,
-    "kCGColorSpaceDeviceGray", NULL, NULL, 0
+    "kCGColorSpaceDeviceGray", NULL, NULL, 0, false, { 0, 0, 0, 0 }
 };
 
 static struct CGColorSpace CGColorSpaceDeviceRGBState = {
     0, true, kCGColorSpaceModelRGB, CGColorSpaceTypeRGB, 3,
-    "kCGColorSpaceDeviceRGB", NULL, NULL, 0
+    "kCGColorSpaceDeviceRGB", NULL, NULL, 0, false, { 0, 0, 0, 0 }
 };
 
 static struct CGColorSpace CGColorSpaceDeviceCMYKState = {
     0, true, kCGColorSpaceModelCMYK, CGColorSpaceTypeCMYK, 4,
-    "kCGColorSpaceDeviceCMYK", NULL, NULL, 0
+    "kCGColorSpaceDeviceCMYK", NULL, NULL, 0, false, { 0, 0, 0, 0 }
 };
 
 /* The name a pattern space reports when it has no base.  A pattern space
@@ -843,7 +853,339 @@ CGColorSpaceRef CGColorSpaceCreateCalibratedRGB(const CGFloat
     return s;
 }
 
+/* Lab.
+
+   Apple builds a Lab profile from a fixed template the way it builds the
+   calibrated ones, but two of its fields differ in kind from anything in gray
+   or RGB.
+
+   The first is the white and black points.  Apple keeps a point only when the
+   caller's double is one a float can hold exactly, and discards the whole tag
+   otherwise, leaving all three coordinates zero.  That single fact accounts
+   for most of what looks strange about this function: D65 and D50 both fail
+   the test, since neither 0.95047 nor 1.08883 is a float, so asking for
+   either yields a profile byte-for-byte identical to the generic Lab space --
+   it is the same synthesised profile, not a bundled resource, which is why
+   CGColorSpaceCreateWithName(kCGColorSpaceGenericLab) produces those bytes
+   too.  A point like (0.5, 1, 1) survives, because all three coordinates are
+   exactly representable, and the profile grows by the 20 bytes its black
+   point then needs.  NaN fails the comparison as well and is discarded with
+   everything else; an infinity passes and saturates below.
+
+   The stored value is 16.16 fixed point in a full 32 bits, so 1.0 is
+   0x00010000 where the s15Fixed16 the gray and RGB spaces use would have
+   clamped it.  A coordinate well outside the unit range therefore survives as
+   a large number rather than a saturated one.
+
+   The second field is the creation date, which is the local wall clock at the
+   moment of the call, to the second.  The gray and RGB templates carry a
+   fixed 2015 date; Lab stamps the time, so two calls three seconds apart
+   differ in one byte, and a byte-exact comparison has to mask 24-35.
+
+   The rest is constant.  The description is the same "Custom Lab Profile"
+   whatever the white point, the two LUTs are a single 124-byte 'mft2' block
+   that A2B0 and B2A0 share, and the profile ID is left all zeros -- the
+   exception put_profile_id notes above.  `range' is accepted and ignored: a
+   sweep over NULL, the all-zero default Apple documents, the extremes of both
+   signs and three arbitrary arrays all produced the same bytes.
+
+   The layout is the RGB one.  Blocks are allocated in build order and a later
+   tag whose stored bytes match an earlier one reuses that block, so a zero
+   white point shares the black point's block and the profile runs to 496
+   bytes with the tag table reading desc, cprt, wtpt, A2B0, bkpt, B2A0.  A
+   white point that survives gives the black point a block of its own, the
+   profile runs to 516, and the table reads in build order. */
+
+/* The creation date is twelve bytes of the shared ICC header at the same
+   offset whatever the space, so it is named once here rather than per
+   template.  It is also the one field that is live rather than a constant:
+   Lab stamps the local time of the call into it. */
+enum {
+    CGICCCreateDateOffset = 24,
+    CGICCCreateDateLength = 12
+};
+
+enum {
+    CGICCLabTagCount = 6,
+    CGICCLabTagTableOffset = 132,
+    /* The description runs 204-312 and the copyright 316-350, each starting
+       on a 4-byte boundary, which leaves 3 and 1 bytes of padding before
+       them and the content starting at 352. */
+    CGICCLabDescOffset = 204,
+    CGICCLabDescLength = 109,
+    CGICCLabCprtOffset = 316,
+    CGICCLabCprtLength = 35,
+    CGICCLabDataOffset = 352,
+    CGICCLabXYZLength = 20,
+    CGICCLabLutLength = 124,
+    CGICCLabCreateDateOffset = CGICCCreateDateOffset,
+    CGICCLabCreateDateLength = CGICCCreateDateLength
+};
+
+    /* Reference: white point (1, 1, 1) and no black point, which is the only
+       shape that gives every tag a block of its own.
+       Bytes 0-3 the profile size and 24-35 the creation date are replaced per
+       call; 84-99 the profile ID stays zero. */
+    static const unsigned char lab_header[128] = {
+        0x00, 0x00, 0x01, 0xf0, 0x61, 0x70, 0x70, 0x6c, 0x02, 0x10, 0x00, 0x00,
+        0x73, 0x70, 0x61, 0x63, 0x4c, 0x61, 0x62, 0x20, 0x4c, 0x61, 0x62, 0x20,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x61, 0x63, 0x73, 0x70, 0x41, 0x50, 0x50, 0x4c, 0x00, 0x00, 0x00, 0x00,
+        0x41, 0x50, 0x50, 0x4c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf6, 0xd6,
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0xd3, 0x2d, 0x61, 0x70, 0x70, 0x6c,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+
+    /* A legacy 'desc' record: no version word, the ASCII length at 8, the
+       text at 12, then zero fill out to 109. */
+    static const unsigned char lab_desc[109] = {
+        0x64, 0x65, 0x73, 0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x13,
+        0x43, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x20, 0x4c, 0x61, 0x62, 0x20, 0x50,
+        0x72, 0x6f, 0x66, 0x69, 0x6c, 0x65, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00,
+    };
+
+    /* A 'text' copyright, the same shape as the gray and RGB records but
+       without the trailing bytes those two carry. */
+    static const unsigned char lab_cprt[35] = {
+        0x74, 0x65, 0x78, 0x74, 0x00, 0x00, 0x00, 0x00, 0x43, 0x6f, 0x70, 0x79,
+        0x72, 0x69, 0x67, 0x68, 0x74, 0x20, 0x41, 0x70, 0x70, 0x6c, 0x65, 0x20,
+        0x49, 0x6e, 0x63, 0x2e, 0x2c, 0x20, 0x32, 0x30, 0x32, 0x36, 0x00,
+    };
+
+    /* One 'mft2' lookup, shared by A2B0 and B2A0: a 3x3x2-entry table, so 9
+       lines of 6 channels.  It is the same in every Lab profile regardless of
+       the white point, which is what lets a 496-byte profile carry it at all. */
+    static const unsigned char lab_lut[124] = {
+        0x6d, 0x66, 0x74, 0x32, 0x00, 0x00, 0x00, 0x00, 0x03, 0x03, 0x02, 0x00,
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x02, 0x00, 0x02, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff,
+        0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff,
+        0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff,
+        0x00, 0x00, 0xff, 0xff,
+    };
+
+static void put_be16(unsigned char *p, unsigned v)
+{
+    p[0] = (unsigned char)(v >> 8);
+    p[1] = (unsigned char)v;
+}
+
+/* The creation date: six 16-bit big-endian fields, year through second, in
+   local time.  Apple stamps the moment of the call, which is the only part of
+   a Lab profile that is not a function of its arguments. */
+static void put_create_date(unsigned char *p)
+{
+    time_t now = time(NULL);
+    struct tm tmv;
+
+    if (!localtime_r(&now, &tmv))
+        return;
+    put_be16(p, (unsigned)(tmv.tm_year + 1900));
+    put_be16(p + 2, (unsigned)(tmv.tm_mon + 1));
+    put_be16(p + 4, (unsigned)tmv.tm_mday);
+    put_be16(p + 6, (unsigned)tmv.tm_hour);
+    put_be16(p + 8, (unsigned)tmv.tm_min);
+    put_be16(p + 10, (unsigned)tmv.tm_sec);
+}
+
+/* Whether Apple keeps this point at all.  Every coordinate is narrowed to
+   float, and unless all three survive the narrowing unchanged the entire tag
+   becomes zero -- one inexpressible coordinate takes the two that are fine
+   with it.  NaN fails here for the same reason and is discarded with the
+   rest; an infinity passes and then saturates in lab_fixed16.
+
+   This is why (0.5, 1, 1) produces a real white point while D65 produces
+   none, and why both 0.5 and 1.0 work while 0.999 and 1.0005 do not: the
+   first two are representable as floats and the last two are not. */
+static int lab_point_kept(const CGFloat v[3])
+{
+    int i;
+
+    for (i = 0; i < 3; i++)
+        if ((CGFloat)(float)v[i] != v[i])
+            return 0;
+    return 1;
+}
+
+/* One stored XYZ coordinate.  Apple adds a half and truncates toward zero,
+   the same idiom as put_s15Fixed16, so halves round up and negative values
+   come out one larger than symmetric rounding would give: -0.5 stores
+   -32767, not -32768.  Out-of-range results saturate rather than wrap, so an
+   infinite coordinate lands on the matching limit.  NaN never arrives: it is
+   rejected by lab_point_kept, and comparing it here would be false on both
+   sides and fall through to the conversion. */
+static int32_t lab_fixed16(CGFloat v)
+{
+    double scaled = (double)v * 65536.0 + 0.5;
+
+    if (scaled >= 2147483647.0)
+        return 2147483647;
+    if (scaled <= -2147483648.0)
+        return (-2147483647 - 1);
+    return (int32_t)scaled;
+}
+
+/* A whole white or black point tag, in the bytes sharing is decided on. */
+static void lab_xyz(unsigned char *p, const CGFloat v[3])
+{
+    int32_t q[3];
+    int i;
+
+    if (lab_point_kept(v)) {
+        for (i = 0; i < 3; i++)
+            q[i] = lab_fixed16(v[i]);
+    } else {
+        q[0] = q[1] = q[2] = 0;
+    }
+    put_xyz_i32(p, q);
+}
+
+CGColorSpaceRef CGColorSpaceCreateLab(const CGFloat
+    whitePoint[CG_NONNULL_ARRAY 3], const CGFloat blackPoint[__nullable 3],
+    const CGFloat range[__nullable 4])
+{
+    static const char *const tagNames[CGICCLabTagCount] = {
+        "desc", "cprt", "wtpt", "bkpt", "A2B0", "B2A0"
+    };
+    static const CGFloat zero[3] = { 0.0, 0.0, 0.0 };
+    unsigned char xyz[2][CGICCLabXYZLength];
+    int32_t tagOff[CGICCLabTagCount], tagLen[CGICCLabTagCount];
+    int owns[CGICCLabTagCount];
+    size_t len, off;
+    struct CGColorSpace *s;
+    unsigned char *p;
+    int i, k;
+
+    /* Taken and ignored; see the note above. */
+    (void)range;
+
+    /* Apple faults on a null white point instead of returning null, so there
+       is no behaviour to copy.  Refusing keeps the dereference honest. */
+    if (!whitePoint)
+        return NULL;
+    s = calloc(1, sizeof *s);
+    if (!s)
+        return NULL;
+    if (!blackPoint)
+        blackPoint = zero;
+
+    lab_xyz(xyz[0], whitePoint);
+    lab_xyz(xyz[1], blackPoint);
+
+    tagOff[0] = CGICCLabDescOffset;
+    tagLen[0] = CGICCLabDescLength;
+    tagOff[1] = CGICCLabCprtOffset;
+    tagLen[1] = CGICCLabCprtLength;
+    owns[0] = owns[1] = 1;
+
+    /* The four content tags in build order.  A2B0 and B2A0 are the same bytes,
+       so the second of them always ends up sharing. */
+    off = CGICCLabDataOffset;
+    for (i = 2; i < CGICCLabTagCount; i++) {
+        const unsigned char *bytes = i < 4 ? xyz[i - 2] : lab_lut;
+        int32_t width = (int32_t)(i < 4 ? CGICCLabXYZLength
+            : CGICCLabLutLength);
+        int shared = 0;
+
+        for (k = 2; k < i; k++) {
+            if (tagLen[k] != width)
+                continue;
+            if (memcmp(k < 4 ? xyz[k - 2] : lab_lut, bytes, (size_t)width))
+                continue;
+            tagOff[i] = tagOff[k];
+            tagLen[i] = width;
+            owns[i] = 0;
+            shared = 1;
+            break;
+        }
+        if (shared)
+            continue;
+        tagOff[i] = (int32_t)off;
+        tagLen[i] = width;
+        owns[i] = 1;
+        off += (size_t)width;
+    }
+    len = off;
+
+    p = malloc(len);
+    if (!p) {
+        free(s);
+        return NULL;
+    }
+    memset(p, 0, len);
+    memcpy(p, lab_header, sizeof lab_header);
+    put_be32(p, (int32_t)len);
+    put_be32(p + 128, CGICCLabTagCount);
+    memcpy(p + CGICCLabDescOffset, lab_desc, CGICCLabDescLength);
+    memcpy(p + CGICCLabCprtOffset, lab_cprt, CGICCLabCprtLength);
+    put_create_date(p + CGICCLabCreateDateOffset);
+    for (i = 2; i < CGICCLabTagCount; i++)
+        if (owns[i])
+            memcpy(p + tagOff[i], i < 4 ? xyz[i - 2] : lab_lut,
+                (size_t)tagLen[i]);
+
+    /* Owners before sharers, each in build order -- the RGB builder's rule. */
+    {
+        int slot = 0, pass;
+
+        for (pass = 0; pass < 2; pass++) {
+            for (i = 0; i < CGICCLabTagCount; i++) {
+                unsigned char *entry;
+
+                if (owns[i] != !pass)
+                    continue;
+                entry = p + CGICCLabTagTableOffset + slot * 12;
+                memcpy(entry, tagNames[i], 4);
+                put_be32(entry + 4, tagOff[i]);
+                put_be32(entry + 8, tagLen[i]);
+                slot++;
+            }
+        }
+    }
+
+    /* Deliberately no put_profile_id: Lab leaves bytes 84-99 zero, as
+       lab_header already has them. */
+
+    s->immortal = false;
+    s->refcount = 1;
+    s->model = kCGColorSpaceModelLab;
+    s->type = CGColorSpaceTypeLab;
+    s->ncomp = 3;
+    /* A calibrated space is named for being calibrated, not for its white
+       point, and this one has no name at all. */
+    s->name = NULL;
+    s->base = NULL;
+    s->profile = p;
+    s->profileLen = len;
+    /* The range is kept beside the profile rather than inside it, which is
+       observable: Apple reports two spaces with byte-identical profiles as
+       unequal when only one of them was given a range.  A NULL range is the
+       absence of one, not a range of zeros, so the flag carries that
+       distinction -- no explicit range ever equals NULL. */
+    s->hasRange = range != NULL;
+    if (range)
+        memcpy(s->range, range, sizeof s->range);
+    return s;
+}
+
 /* Reference counting. */
+
 
 CGColorSpaceRef CGColorSpaceRetain(CGColorSpaceRef space)
 {
@@ -1018,13 +1360,37 @@ bool CGColorSpaceEqualToColorSpace(CGColorSpaceRef space1,
        spaces built from the same white point, black point and gamma are
        equal however they were built, and two built from different ones are
        not -- a calibrated space is not "some gray space", it is this gray
-       space.  Comparing the model alone would call every pair equal. */
+       space.  Comparing the model alone would call every pair equal.
+
+       The comparison skips the creation date.  Apple stamps the local time
+       into a Lab profile, and yet reports two Lab spaces built from the same
+       arguments a second apart as equal, so the date is part of the profile
+       that gets handed out and not part of the identity.  For the other
+       calibrated spaces the field is constant, so skipping it changes
+       nothing.
+
+       A Lab space also carries a range that the profile does not describe,
+       so it has to be compared too, or two spaces Apple calls different would
+       look identical here. */
     if (a->profile || b->profile) {
+        size_t k;
+
         if (!a->profile || !b->profile)
             return false;
         if (a->profileLen != b->profileLen)
             return false;
-        return memcmp(a->profile, b->profile, a->profileLen) == 0;
+        if (a->hasRange != b->hasRange)
+            return false;
+        if (a->hasRange && memcmp(a->range, b->range, sizeof a->range) != 0)
+            return false;
+        for (k = 0; k < a->profileLen; k++) {
+            if (k >= CGICCCreateDateOffset
+                && k < CGICCCreateDateOffset + CGICCCreateDateLength)
+                continue;
+            if (a->profile[k] != b->profile[k])
+                return false;
+        }
+        return true;
     }
     /* Two device spaces are equal when they are the same one; distinct
        shapes are not equal. */
