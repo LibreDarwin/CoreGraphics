@@ -151,6 +151,45 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateLab(const CGFloat
     whitePoint[CG_NONNULL_ARRAY 3], const CGFloat blackPoint[__nullable 3],
     const CGFloat range[__nullable 4]);
 
+/* Create a linearized version of `baseSpace', whose transfer function is
+   replaced by the identity.  `baseSpace' must be a gray or RGB space that
+   carries a profile; a device space, a pattern space, a Lab space and NULL
+   all yield NULL.
+
+   The profile is byte-for-byte identical to Apple's: 276 bytes for a gray
+   space and 396 for RGB, with the base's white point and colorants copied
+   verbatim, its black point and copyright dropped, the tone curve replaced by
+   a one-entry 'curv', and the profile ID left all zeros as it is for Lab.
+   The creation date is a constant, as for the calibrated spaces.
+
+   Linearizing is not idempotent, because the description is built by
+   appending " Linearized" to whatever description the base carries: doing it
+   twice gives a 300-byte profile whose description says so.  `baseSpace' is
+   not retained and the result reports no extended range, but an RGB result
+   does report a wide gamut. */
+CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateLinearized(
+    CGColorSpaceRef cg_nullable baseSpace);
+
+/* Create an extended-range version of `baseSpace', which must be a gray or
+   RGB space that carries a profile, exactly as for
+   CGColorSpaceCreateLinearized.
+
+   This synthesises no profile at all: the result hands back its base's
+   profile byte for byte, including the profile ID.  What distinguishes it is
+   a flag beside the profile, which is why it is observable -- the result
+   reports CGColorSpaceUsesExtendedRange, is reported unequal to its base, and
+   for RGB also reports a wide gamut -- even though the two profiles are
+   identical. */
+CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateExtended(
+    CGColorSpaceRef cg_nullable baseSpace);
+
+/* Create an extended-range linearized version of `baseSpace'.  This
+   synthesises exactly the profile CGColorSpaceCreateLinearized does and sets
+   the extended flag as well, so the profile is identical and only the flags
+   differ; the two spaces are reported unequal for that reason. */
+CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateExtendedLinearized(
+    CGColorSpaceRef cg_nullable baseSpace);
+
 /* Return the CoreFoundation type identifier of a color space, which is 73.
    This is a constant in Apple's framework: every color space reports 73
    regardless of its model, because the identifier names the CF class
@@ -217,13 +256,17 @@ CG_EXTERN bool CGColorSpaceIsHLGBased(CGColorSpaceRef cg_nullable space) CG_PURE
    False for every space this step implements. */
 CG_EXTERN bool CGColorSpaceIsPQBased(CGColorSpaceRef cg_nullable space) CG_PURE;
 
-/* Return true if `space' has a gamut wider than sRGB.  False for every
-   space this step implements. */
+/* Return true if `space' has a gamut wider than sRGB.  True for a three
+   component space that was built by CGColorSpaceCreateLinearized,
+   CGColorSpaceCreateExtended or CGColorSpaceCreateExtendedLinearized, and
+   false for every other space, including a calibrated RGB space. */
 CG_EXTERN bool CGColorSpaceIsWideGamutRGB(CGColorSpaceRef cg_nullable space)
     CG_PURE;
 
-/* Return true if `space' uses values outside 0..1.  False for every space
-   this step implements. */
+/* Return true if `space' uses values outside 0..1.  True only for the spaces
+   built by CGColorSpaceCreateExtended and
+   CGColorSpaceCreateExtendedLinearized; a linearized space, which is
+   extended in the everyday sense, reports false. */
 CG_EXTERN bool CGColorSpaceUsesExtendedRange(CGColorSpaceRef cg_nullable space)
     CG_PURE;
 

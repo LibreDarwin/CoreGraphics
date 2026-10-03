@@ -98,6 +98,24 @@ struct CGColorSpace {
        apart. */
     bool hasRange;
     CGFloat range[4];
+    /* Whether the space uses values outside 0..1, which is what
+       CGColorSpaceUsesExtendedRange reports and what an extended space
+       carries that its base does not.
+
+       This is not derivable from the profile.  CGColorSpaceCreateExtended
+       hands back a profile byte-for-byte identical to the base's, and yet
+       Apple reports the two spaces unequal, so the difference cannot live
+       in the profile and is kept beside it.  A linearized space is *not*
+       flagged: it is extended in the everyday sense but reports false, which
+       is why CGColorSpaceIsWideGamutRGB cannot be answered from this flag
+       alone either. */
+    bool extended;
+    /* Whether the space was built by CGColorSpaceCreateLinearized.  This one
+       is observable too: a linearized RGB space reports a wide gamut while
+       reporting no extended range, and a linearized gray space reports
+       neither.  Deriving it from the profile would mean looking for an
+       identity tone curve, which is what the flag records. */
+    bool linearized;
 };
 
 
@@ -109,17 +127,17 @@ struct CGColorSpace {
    "Device RGB". */
 static struct CGColorSpace CGColorSpaceDeviceGrayState = {
     0, true, kCGColorSpaceModelMonochrome, CGColorSpaceTypeMonochrome, 1,
-    "kCGColorSpaceDeviceGray", NULL, NULL, 0, false, { 0, 0, 0, 0 }
+    "kCGColorSpaceDeviceGray", NULL, NULL, 0, false, { 0, 0, 0, 0 }, false, false
 };
 
 static struct CGColorSpace CGColorSpaceDeviceRGBState = {
     0, true, kCGColorSpaceModelRGB, CGColorSpaceTypeRGB, 3,
-    "kCGColorSpaceDeviceRGB", NULL, NULL, 0, false, { 0, 0, 0, 0 }
+    "kCGColorSpaceDeviceRGB", NULL, NULL, 0, false, { 0, 0, 0, 0 }, false, false
 };
 
 static struct CGColorSpace CGColorSpaceDeviceCMYKState = {
     0, true, kCGColorSpaceModelCMYK, CGColorSpaceTypeCMYK, 4,
-    "kCGColorSpaceDeviceCMYK", NULL, NULL, 0, false, { 0, 0, 0, 0 }
+    "kCGColorSpaceDeviceCMYK", NULL, NULL, 0, false, { 0, 0, 0, 0 }, false, false
 };
 
 /* The name a pattern space reports when it has no base.  A pattern space
@@ -277,9 +295,23 @@ CGColorSpaceRef CGColorSpaceCreatePattern(CGColorSpaceRef baseSpace)
     return s;
 }
 
+/* Declared ahead of its first use: the gray builder needs to repoint tag
+   table entries, and the definition sits with the calibrated-RGB helpers. */
+static void put_be32(unsigned char *p, int32_t v);
+
 /* Offsets into the gray template, named so the patch sites read as what they
    are rather than as magic numbers. */
 enum {
+    CGICCHeaderLength = 128,
+    /* The data colour space signature, four bytes in.  It is what decides
+       whether a profile can be linearized: 'GRAY' and 'RGB ' can, and 'Lab '
+       cannot even though it also has three components. */
+    CGICCColorSpaceOffset = 16,
+    /* A tag count, then 12-byte entries of signature, offset and length. */
+    CGICCTagCountOffset = 128,
+    CGICCTagTableOffset = 132,
+    /* An XYZType is 'XYZ ', four reserved bytes, then three s15Fixed16. */
+    CGICCXYZLength = 20,
     CGICCProfileIDOffset = 84,          /* 16 bytes */
     CGICCProfileIDLength = 16,
     CGICCFlagsOffset = 44,              /* 4 bytes, zeroed for the digest */
@@ -291,7 +323,13 @@ enum {
     CGICCGrayBKptOffset = 344,
     /* The gamma itself, four bytes into the 16-byte tone curve. */
     CGICCGrayGammaOffset = 376,
-    CGICCGrayLength = 380
+    CGICCGrayLength = 380,
+    /* When the black point shares the white point's block the tone curve
+       moves up into the black point's old slot and the profile is 20 bytes
+       shorter. */
+    CGICCGrayTRCOffset = CGICCGrayGammaOffset - 12,
+    CGICCGrayCollapsedTRCOffset = CGICCGrayTRCOffset - CGICCXYZLength,
+    CGICCGrayCollapsedLength = CGICCGrayLength - CGICCXYZLength
 };
 
     /* Reference: white point D50, black point 0, gamma 2.2.
@@ -446,6 +484,7 @@ CGColorSpaceRef CGColorSpaceCreateCalibratedGray(const CGFloat
     static const CGFloat zero[3] = { 0.0, 0.0, 0.0 };
     struct CGColorSpace *s;
     unsigned char *p;
+    size_t len;
 
     /* Apple's signature marks the white point nonnull, so a NULL there is
        a caller error rather than a request for a default; checking it only
@@ -465,7 +504,46 @@ CGColorSpaceRef CGColorSpaceCreateCalibratedGray(const CGFloat
     put_xyz(p + CGICCGrayWTptOffset, whitePoint);
     put_xyz(p + CGICCGrayBKptOffset, blackPoint ? blackPoint : zero);
     put_tone_curve(p + CGICCGrayGammaOffset - 12, gamma);
-    put_profile_id(p, CGICCGrayLength);
+
+    /* A black point that quantises to the same bytes as the white point
+       shares its block rather than getting one of its own, which pulls the
+       tone curve up by 20 bytes and takes 20 off the end.  The tag table
+       keeps the same five entries but lists the tag that lost its block
+       last.  A zero white point with no black point is the case that
+       reaches this; the usual case has a white point and a black point that
+       differ and never does. */
+    if (memcmp(p + CGICCGrayWTptOffset, p + CGICCGrayBKptOffset,
+            CGICCXYZLength) == 0) {
+        unsigned char *q = malloc(CGICCGrayCollapsedLength);
+
+        if (!q) {
+            free(p);
+            free(s);
+            return NULL;
+        }
+        memcpy(q, p, CGICCGrayBKptOffset);
+        memcpy(q + CGICCGrayCollapsedTRCOffset,
+            p + CGICCGrayTRCOffset, 16);
+        /* Slots three and four swap places, and their offsets change: the
+           tone curve moves down to where the black point was, and the black
+           point points at the white point.  Slot two still describes the
+           white point. */
+        memcpy(q + CGICCTagTableOffset + 3 * 12, p + CGICCTagTableOffset + 4 * 12,
+            12);
+        put_be32(q + CGICCTagTableOffset + 3 * 12 + 4,
+            (int32_t)CGICCGrayCollapsedTRCOffset);
+        memcpy(q + CGICCTagTableOffset + 4 * 12, p + CGICCTagTableOffset + 3 * 12,
+            12);
+        put_be32(q + CGICCTagTableOffset + 4 * 12 + 4,
+            (int32_t)CGICCGrayWTptOffset);
+        free(p);
+        p = q;
+        len = CGICCGrayCollapsedLength;
+    } else {
+        len = CGICCGrayLength;
+    }
+    put_be32(p, (int32_t)len);
+    put_profile_id(p, len);
 
     s->immortal = false;
     s->refcount = 1;
@@ -477,7 +555,7 @@ CGColorSpaceRef CGColorSpaceCreateCalibratedGray(const CGFloat
     s->name = NULL;
     s->base = NULL;
     s->profile = p;
-    s->profileLen = CGICCGrayLength;
+    s->profileLen = len;
     return s;
 }
 
@@ -1184,6 +1262,379 @@ CGColorSpaceRef CGColorSpaceCreateLab(const CGFloat
     return s;
 }
 
+/* Linearized and extended spaces.
+
+   Only one of the three synthesises anything.  CGColorSpaceCreateExtended
+   copies its base's profile byte for byte and sets a flag; and
+   CGColorSpaceCreateExtendedLinearized produces a profile byte for byte
+   identical to CGColorSpaceCreateLinearized's, differing only in that same
+   flag.  Both are observable only because Apple reports an extended space
+   unequal to the base whose profile it hands back unchanged, and because
+   CGColorSpaceUsesExtendedRange tells them apart.
+
+   CreateLinearized does the real work, and its profile keeps the base's white
+   point and colorants verbatim -- read straight out of the base profile, not
+   recomputed -- while dropping the black point and the copyright, replacing
+   the tone curve with an identity one, and leaving the profile ID all zeros.
+   The creation date is a constant here, as it is for the calibrated spaces,
+   so unlike Lab no byte of it is live.
+
+   The description is the one field that is not a copy: Apple appends
+   " Linearized" to whatever description it is given, so linearizing an
+   already-linearized space appends the word a second time and the profile
+   grows by the 22 bytes the appended text occupies.  That is why
+   linearizing is not idempotent, and why the result is not something that can
+   be produced by a fixed template. */
+
+/* A big-endian 32-bit read, for the tag table. */
+static uint32_t get_be32(const unsigned char *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
+        | ((uint32_t)p[2] << 8) | p[3];
+}
+
+/* Find a tag in an ICC profile and return where its data starts.
+
+   The table is a count at byte 128 followed by 12-byte entries of a
+   four-character signature, a big-endian offset and a big-endian length.
+   Several tags can point at one block -- that is how Apple shares a tone
+   curve between the three channels -- so the length is a property of the tag
+   and not of the block, which is why it is returned rather than inferred. */
+static long icc_find_tag(const unsigned char *p, size_t len, const char *sig,
+    size_t *tagLen)
+{
+    uint32_t count, i;
+
+    if (len < CGICCTagTableOffset)
+        return -1;
+    count = get_be32(p + CGICCTagCountOffset);
+    if (count > (len - CGICCTagTableOffset) / 12)
+        return -1;
+    for (i = 0; i < count; i++) {
+        const unsigned char *e = p + CGICCTagTableOffset + (size_t)i * 12;
+
+        if (memcmp(e, sig, 4) == 0) {
+            size_t off = get_be32(e + 4);
+            size_t l = get_be32(e + 8);
+
+            if (off > len || l > len - off)
+                return -1;
+            if (tagLen)
+                *tagLen = l;
+            return (long)off;
+        }
+    }
+    return -1;
+}
+
+/* The description tag is an mluc: 'mluc', four reserved bytes, a record
+   count, a record size, then that many records of language, country, length
+   and offset.  Apple writes exactly one enUS record and puts the text at
+   offset 28, which is the size of the header and the record together, so the
+   text begins where the record describing it ends. */
+enum {
+    CGICCMLUCRecordLength = 28
+};
+
+static int mluc_text(const unsigned char *tag, size_t len,
+    const unsigned char **text, size_t *textLen)
+{
+    uint32_t count, recSize, recLen, off;
+
+    if (len < CGICCMLUCRecordLength || memcmp(tag, "mluc", 4) != 0)
+        return 0;
+    count = get_be32(tag + 8);
+    recSize = get_be32(tag + 12);
+    if (count == 0 || recSize < 12)
+        return 0;
+    recLen = get_be32(tag + 20);
+    off = get_be32(tag + 24);
+    if (off > len || recLen > len - off)
+        return 0;
+    *text = tag + off;
+    *textLen = recLen;
+    return 1;
+}
+
+/* " Linearized", in the UTF-16BE an mluc stores its text in. */
+static const unsigned char CGICCLinearizedWord[] = {
+    0x00,  0x20,  0x00,  0x4c,  0x00,  0x69,  0x00,  0x6e,  0x00,  0x65,
+    0x00,  0x61,  0x00,  0x72,  0x00,  0x69,  0x00,  0x7a,  0x00,  0x65,
+    0x00,  0x64
+};
+
+/* The tone curve of a linearized space: a 'curv' with a single entry, which
+   is the identity curve by definition.  Apple declares it 14 bytes here
+   rather than padding to 16 the way the parametric curve in the calibrated
+   templates is, so the last tag of a linearized gray profile ends at 274 and
+   the profile is 276 after padding. */
+static const unsigned char CGICCIdentityCurve[14] = {
+    0x63,  0x75,  0x72,  0x76,  0x00,  0x00,  0x00,  0x00,
+    0x00,  0x00,  0x00,  0x01,  0x01,  0x00
+};
+
+/* The tag table of a linearized profile: three tags for a gray space and
+   eight for RGB.  The three tone curves are listed as r, b, g and all point
+   at one block, which is the order the calibrated RGB template uses for the
+   same three tags. */
+static const char *const CGICCLinearizedGrayTags[] = { "desc", "wtpt", "kTRC" };
+static const char *const CGICCLinearizedRGBTags[] = {
+    "desc", "wtpt", "rXYZ", "gXYZ", "bXYZ", "rTRC", "bTRC", "gTRC"
+};
+
+/* Round an offset up to the 4-byte boundary the tag data starts on. */
+static size_t align4(size_t off)
+{
+    return (off + 3) & ~(size_t)3;
+}
+
+/* Build the space, sharing one code path between the three entry points. */
+static CGColorSpaceRef CGColorSpaceCreateLinearizedInternal(
+    CGColorSpaceRef baseSpace, bool extended)
+{
+    struct CGColorSpace *base = baseSpace;
+    struct CGColorSpace *s;
+    const char *const *tags;
+    const unsigned char *baseText;
+    unsigned char *p, *baseDesc;
+    size_t baseTextLen, descLen, tagLen, len, off, descOff, wtptOff, trcOff;
+    size_t colorOff[3] = { 0, 0, 0 };
+    bool colorOwn[3] = { false, false, false };
+    long wtptAt, colorAt[3], descAt;
+    size_t ntags;
+    bool rgb;
+    int i;
+
+    if (!base || !base->profile)
+        return NULL;
+    /* Only a gray or RGB profile can be linearized.  The device and pattern
+       spaces have no profile, and a Lab profile is a device class of its own
+       whose tags are not tone curves -- so the data colour space in the
+       header, not the component count, is what decides. */
+    if (memcmp(base->profile + CGICCColorSpaceOffset, "GRAY", 4) == 0) {
+        rgb = false;
+    } else if (memcmp(base->profile + CGICCColorSpaceOffset, "RGB ", 4) == 0) {
+        rgb = true;
+    } else {
+        return NULL;
+    }
+
+    /* Everything the new profile keeps is read out of the base's, so a base
+       that is itself linearized or extended -- which is why chaining works
+       -- needs no special case. */
+    descAt = icc_find_tag(base->profile, base->profileLen, "desc", &tagLen);
+    if (descAt < 0 || !mluc_text(base->profile + descAt, tagLen, &baseText,
+        &baseTextLen))
+        return NULL;
+    wtptAt = icc_find_tag(base->profile, base->profileLen, "wtpt", &tagLen);
+    if (wtptAt < 0 || tagLen != CGICCXYZLength)
+        return NULL;
+    if (rgb) {
+        static const char *const xyz[3] = { "rXYZ", "gXYZ", "bXYZ" };
+
+        for (i = 0; i < 3; i++) {
+            colorAt[i] = icc_find_tag(base->profile, base->profileLen,
+                xyz[i], &tagLen);
+            if (colorAt[i] < 0 || tagLen != CGICCXYZLength)
+                return NULL;
+        }
+    }
+
+    tags = rgb ? CGICCLinearizedRGBTags : CGICCLinearizedGrayTags;
+    ntags = rgb ? sizeof CGICCLinearizedRGBTags / sizeof *CGICCLinearizedRGBTags
+        : sizeof CGICCLinearizedGrayTags / sizeof *CGICCLinearizedGrayTags;
+    descLen = CGICCMLUCRecordLength + baseTextLen
+        + sizeof CGICCLinearizedWord;
+
+    /* The tag data follows the table, each block aligned to 4.  The three
+       tone curves share the last block, so a profile ends just after it.
+
+       A colorant that quantises to the same bytes as the white point, or as
+       an earlier colorant, does not get a block of its own -- it points at
+       the block already holding those bytes.  A zero white point makes every
+       colorant zero as well, so all three collapse onto the white point and
+       a profile ends up 60 bytes shorter. */
+    off = align4(CGICCTagTableOffset + ntags * 12);
+    descOff = off;
+    off = align4(off + descLen);
+    wtptOff = off;
+    off += CGICCXYZLength;
+    if (rgb) {
+        for (i = 0; i < 3; i++) {
+            const unsigned char *at = base->profile + colorAt[i];
+
+            if (memcmp(at, base->profile + wtptAt, CGICCXYZLength) == 0) {
+                colorOff[i] = wtptOff;
+                continue;
+            }
+            if (i && memcmp(at, base->profile + colorAt[i - 1],
+                    CGICCXYZLength) == 0) {
+                colorOff[i] = colorOff[i - 1];
+                continue;
+            }
+            colorOwn[i] = true;
+            colorOff[i] = off;
+            off += CGICCXYZLength;
+        }
+    }
+    trcOff = off;
+    len = align4(off + sizeof CGICCIdentityCurve);
+
+    p = calloc(1, len);
+    if (!p)
+        return NULL;
+    s = calloc(1, sizeof *s);
+    if (!s) {
+        free(p);
+        return NULL;
+    }
+
+    /* The header is the base's, so the version, the device class, the
+       platform and manufacturer, the rendering intent and the constant
+     creation date all carry over.  Only the size changes -- and the profile
+       ID, which is left zeroed as it is for a Lab space. */
+    memcpy(p, base->profile, CGICCHeaderLength);
+    p[0] = (unsigned char)(len >> 24);
+    p[1] = (unsigned char)(len >> 16);
+    p[2] = (unsigned char)(len >> 8);
+    p[3] = (unsigned char)len;
+    memset(p + CGICCProfileIDOffset, 0, CGICCProfileIDLength);
+    put_be32(p + CGICCTagCountOffset, (int32_t)ntags);
+
+    baseDesc = p + descOff;
+    memcpy(baseDesc, base->profile + descAt, CGICCMLUCRecordLength);
+    put_be32(baseDesc + 20, (int32_t)(baseTextLen + sizeof CGICCLinearizedWord));
+    memcpy(baseDesc + CGICCMLUCRecordLength, baseText, baseTextLen);
+    memcpy(baseDesc + CGICCMLUCRecordLength + baseTextLen,
+        CGICCLinearizedWord, sizeof CGICCLinearizedWord);
+
+    memcpy(p + wtptOff, base->profile + wtptAt, CGICCXYZLength);
+    if (rgb) {
+        for (i = 0; i < 3; i++)
+            if (colorOwn[i])
+                memcpy(p + colorOff[i], base->profile + colorAt[i],
+                    CGICCXYZLength);
+    }
+    memcpy(p + trcOff, CGICCIdentityCurve, sizeof CGICCIdentityCurve);
+
+    /* The tag table lists the tags that own a block first, in allocation
+       order, and the tags that point at an existing block after them.  With
+       nothing shared the two groups run together and the table is just the
+       natural order, which is why this is not visible for any base whose
+       colorants differ.
+
+       Each tag's block is settled once here and the two passes below only
+       decide which group it goes in, so the offset and length of a tag cannot
+       come out different in the two places that write it. */
+    {
+        size_t off1[8], len1[8];
+        bool owns1[8];
+        size_t slot = 0;
+        int trcFirst, pass;
+
+        /* The tone curves come after the colorants, so the first tag that is
+           not a colorant is the one that owns the shared curve block.  That is
+           rTRC for an RGB profile and kTRC for a gray one. */
+        for (trcFirst = 2; trcFirst < (int)ntags; trcFirst++)
+            if (tags[trcFirst][1] != 'X')
+                break;
+
+        for (i = 0; i < (int)ntags; i++) {
+            if (i == 0) {
+                off1[i] = descOff;
+                len1[i] = descLen;
+                owns1[i] = true;
+            } else if (i == 1) {
+                off1[i] = wtptOff;
+                len1[i] = CGICCXYZLength;
+                owns1[i] = true;
+            } else if (tags[i][1] == 'X') {
+                off1[i] = colorOff[i - 2];
+                len1[i] = CGICCXYZLength;
+                owns1[i] = colorOwn[i - 2];
+            } else {
+                /* rTRC, bTRC and gTRC all name one shared block, so only the
+                   entry that names it first owns the bytes. */
+                off1[i] = trcOff;
+                len1[i] = sizeof CGICCIdentityCurve;
+                owns1[i] = (i == trcFirst);
+            }
+        }
+        for (pass = 0; pass < 2; pass++)
+            for (i = 0; i < (int)ntags; i++) {
+                unsigned char *e;
+
+                if (owns1[i] != (pass == 0))
+                    continue;
+                e = p + CGICCTagTableOffset + slot * 12;
+                memcpy(e, tags[i], 4);
+                put_be32(e + 4, (int32_t)off1[i]);
+                put_be32(e + 8, (int32_t)len1[i]);
+                slot++;
+            }
+    }
+
+    s->immortal = false;
+    s->refcount = 1;
+    s->model = base->model;
+    s->type = base->type;
+    s->ncomp = base->ncomp;
+    s->name = base->name;
+    s->base = NULL;
+    s->profile = p;
+    s->profileLen = len;
+    s->linearized = true;
+    s->extended = extended;
+    return s;
+}
+
+CGColorSpaceRef CGColorSpaceCreateLinearized(CGColorSpaceRef baseSpace)
+{
+    return CGColorSpaceCreateLinearizedInternal(baseSpace, false);
+}
+
+CGColorSpaceRef CGColorSpaceCreateExtendedLinearized(
+    CGColorSpaceRef baseSpace)
+{
+    return CGColorSpaceCreateLinearizedInternal(baseSpace, true);
+}
+
+/* The extended variant of a calibrated space.  This one synthesises nothing:
+   the profile is the base's, unchanged down to the profile ID, and the only
+   difference between the two spaces is the flag. */
+CGColorSpaceRef CGColorSpaceCreateExtended(CGColorSpaceRef baseSpace)
+{
+    struct CGColorSpace *base = baseSpace;
+    struct CGColorSpace *s;
+    unsigned char *p;
+
+    if (!base || !base->profile)
+        return NULL;
+    if (memcmp(base->profile + CGICCColorSpaceOffset, "GRAY", 4) != 0
+        && memcmp(base->profile + CGICCColorSpaceOffset, "RGB ", 4) != 0)
+        return NULL;
+    p = malloc(base->profileLen);
+    if (!p)
+        return NULL;
+    memcpy(p, base->profile, base->profileLen);
+    s = calloc(1, sizeof *s);
+    if (!s) {
+        free(p);
+        return NULL;
+    }
+    s->immortal = false;
+    s->refcount = 1;
+    s->model = base->model;
+    s->type = base->type;
+    s->ncomp = base->ncomp;
+    s->name = base->name;
+    s->base = NULL;
+    s->profile = p;
+    s->profileLen = base->profileLen;
+    s->extended = true;
+    return s;
+}
+
 /* Reference counting. */
 
 
@@ -1371,7 +1822,14 @@ bool CGColorSpaceEqualToColorSpace(CGColorSpaceRef space1,
 
        A Lab space also carries a range that the profile does not describe,
        so it has to be compared too, or two spaces Apple calls different would
-       look identical here. */
+       look identical here.
+
+       The same is true of an extended space, and it is the sharper case: an
+       extended space's profile is its base's byte for byte, so comparing
+       profiles alone would report every space equal to its own extended
+       form.  The linearized flag is compared for the same reason -- a
+       linearized space and an extended linearized space have identical
+       profiles and are still unequal. */
     if (a->profile || b->profile) {
         size_t k;
 
@@ -1382,6 +1840,8 @@ bool CGColorSpaceEqualToColorSpace(CGColorSpaceRef space1,
         if (a->hasRange != b->hasRange)
             return false;
         if (a->hasRange && memcmp(a->range, b->range, sizeof a->range) != 0)
+            return false;
+        if (a->extended != b->extended || a->linearized != b->linearized)
             return false;
         for (k = 0; k < a->profileLen; k++) {
             if (k >= CGICCCreateDateOffset
@@ -1436,14 +1896,41 @@ bool CGColorSpaceIsPQBased(CGColorSpaceRef space)
 
 bool CGColorSpaceIsWideGamutRGB(CGColorSpaceRef space)
 {
-    (void)space;
-    return false;
+    struct CGColorSpace *s = space;
+
+    /* A gamut wider than sRGB is not a property of the profile: a linearized
+       RGB space answers true while answering false for an extended range,
+       and both an extended gray and a linearized gray answer false.  So it
+       is a three-component space that was linearized or extended, and
+       nothing else.
+
+       One caveat, and it is visible in the profile rather than the flags.  A
+       linearized RGB space whose colorants all collapsed onto the white
+       point's block is degenerate -- a zero white point makes every colorant
+       zero as well -- and Apple does not call those wide gamut.  The collapse
+       is legible in the tag table, so it can be asked rather than recorded. */
+    if (s == NULL || s->ncomp != 3 || (!s->extended && !s->linearized))
+        return false;
+    if (s->linearized && !s->extended && s->profile) {
+        size_t len;
+        long wtpt = icc_find_tag(s->profile, s->profileLen, "wtpt", &len);
+        long rXYZ = icc_find_tag(s->profile, s->profileLen, "rXYZ", &len);
+
+        if (wtpt < 0 || rXYZ < 0 || wtpt == rXYZ)
+            return false;
+    }
+    return true;
 }
 
 bool CGColorSpaceUsesExtendedRange(CGColorSpaceRef space)
 {
-    (void)space;
-    return false;
+    struct CGColorSpace *s = space;
+
+    /* True only for the spaces built by CreateExtended and
+       CreateExtendedLinearized.  A linearized space is not flagged, so this
+       cannot be derived from the profile: an extended space hands back its
+       base's profile unchanged. */
+    return s != NULL && s->extended;
 }
 
 bool CGColorSpaceIsUncalibrated(CGColorSpaceRef space)

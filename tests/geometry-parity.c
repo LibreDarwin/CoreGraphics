@@ -1591,6 +1591,332 @@ int main(void)
             }
         }
 
+        /* Linearized and extended spaces.
+
+           These are a different kind of step from the calibrated ones.  The
+           profile is not a template with a few fields filled in; it is
+           assembled out of the base profile's own tags, so the cases that
+           matter are the ones that decide which tags are carried over and
+           which are dropped, plus the two places where the result stops
+           being a function of its arguments at all.
+
+           The first is the white point and the colorants, which are copied
+           verbatim rather than recomputed, and the tone curve and black point
+           and copyright, which are discarded.  The second is the
+           description, which is built by appending to the base's, so that
+           linearizing an already-linearized space is not the identity.
+
+           No case here masks the creation date: unlike Lab, every profile in
+           this family stamps a constant one.  That is worth pinning down, so
+           the profile cases use the unmasked comparison. */
+        {
+            static const CGFloat d50[3] = { 0.9505, 1.0, 1.0890 };
+            static const CGFloat d65[3] = { 0.95047, 1.0, 1.08883 };
+            static const CGFloat unity[3] = { 1.0, 1.0, 1.0 };
+            static const CGFloat zero[3] = { 0.0, 0.0, 0.0 };
+            static const CGFloat odd[3] = { 0.2, 0.4, 0.6 };
+            static const CGFloat g222[3] = { 2.2, 2.2, 2.2 };
+            static const CGFloat g321[3] = { 1.8, 2.2, 1.0 };
+            static const CGFloat idm[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+            static const CGFloat p3m[9] = {
+                0.4866, 0.2657, 0.1982,
+                0.2289, 0.6917, 0.0794,
+                0.0000, 0.0451, 1.0439,
+            };
+            /* Bases to build from.  Two sets of five: one with a default
+               black point and one with an explicit one, because the linear
+               profile is supposed to drop the black point either way, and an
+               implementation that carried it over would only show up on the
+               second set.  `gscal' is the per-channel gamma for the RGB
+               bases; gray takes a single gamma. */
+            static const CGFloat *const wps[] = { d50, d65, unity, zero, odd };
+            static const CGFloat *const matrices[] = { idm, p3m };
+            static const CGFloat gsc[2] = { 2.2, 1.8 };
+            static const CGFloat *const rgammas[] = { g222, g321 };
+            CGColorSpaceRef graybase[5], rgbbase[5], graybp[5], rgbbp[5];
+            size_t i, k;
+
+            for (i = 0; i < 5; i++) {
+                graybase[i] = CGColorSpaceCreateCalibratedGray(wps[i], NULL,
+                    gsc[i % 2]);
+                rgbbase[i] = CGColorSpaceCreateCalibratedRGB(wps[i], NULL,
+                    rgammas[i % 2], matrices[i % 2]);
+                graybp[i] = CGColorSpaceCreateCalibratedGray(wps[i], odd,
+                    gsc[i % 2]);
+                rgbbp[i] = CGColorSpaceCreateCalibratedRGB(wps[i], odd,
+                    rgammas[i % 2], matrices[i % 2]);
+            }
+
+            /* Every base, through all three entry points. */
+            for (i = 0; i < 5; i++) {
+                CGColorSpaceRef base = graybase[i];
+                CGColorSpaceRef rgbb = rgbbase[i];
+
+                for (int which = 0; which < 2; which++) {
+                    const char *kind = which ? "rgb" : "gray";
+                    CGColorSpaceRef src = which ? rgbb : base;
+                    CGColorSpaceRef lin = CGColorSpaceCreateLinearized(src);
+                    CGColorSpaceRef ext = CGColorSpaceCreateExtended(src);
+                    CGColorSpaceRef xlin =
+                        CGColorSpaceCreateExtendedLinearized(src);
+                    CFDataRef d;
+
+                    snprintf(l, sizeof l, "lin/%s/%zu/non_null", kind, i);
+                    b(l, lin != NULL);
+                    if (lin) {
+                        snprintf(l, sizeof l, "lin/%s/%zu/model", kind, i);
+                        n(l, (long long)CGColorSpaceGetModel(lin));
+                        snprintf(l, sizeof l, "lin/%s/%zu/ncomp", kind, i);
+                        n(l, (long long)CGColorSpaceGetNumberOfComponents(lin));
+                        snprintf(l, sizeof l, "lin/%s/%zu/base_is_null", kind, i);
+                        b(l, CGColorSpaceGetBaseColorSpace(lin) == NULL);
+                        snprintf(l, sizeof l, "lin/%s/%zu/name_is_null", kind, i);
+                        b(l, CGColorSpaceCopyName(lin) == NULL);
+                        /* The whole profile, unmasked: the date is constant
+                           in this family, so nothing needs masking and a
+                           live date would be caught. */
+                        d = CGColorSpaceCopyICCData(lin);
+                        snprintf(l, sizeof l, "lin/%s/%zu/profile", kind, i);
+                        icc(l, d);
+                        if (d) CFRelease(d);
+                        /* Not extended, but wide if it has three
+                           components. */
+                        snprintf(l, sizeof l, "lin/%s/%zu/ext_range", kind, i);
+                        b(l, CGColorSpaceUsesExtendedRange(lin));
+                        snprintf(l, sizeof l, "lin/%s/%zu/wide", kind, i);
+                        b(l, CGColorSpaceIsWideGamutRGB(lin));
+                        snprintf(l, sizeof l, "lin/%s/%zu/ps2", kind, i);
+                        b(l, CGColorSpaceIsPSLevel2Compatible(lin));
+                        snprintf(l, sizeof l, "lin/%s/%zu/icc", kind, i);
+                        b(l, CGColorSpaceIsICCCompatible(lin));
+                    }
+                    if (ext) {
+                        d = CGColorSpaceCopyICCData(ext);
+                        snprintf(l, sizeof l, "ext/%s/%zu/profile", kind, i);
+                        icc(l, d);
+                        if (d) CFRelease(d);
+                        /* Extended, and wide only for RGB. */
+                        snprintf(l, sizeof l, "ext/%s/%zu/ext_range", kind, i);
+                        b(l, CGColorSpaceUsesExtendedRange(ext));
+                        snprintf(l, sizeof l, "ext/%s/%zu/wide", kind, i);
+                        b(l, CGColorSpaceIsWideGamutRGB(ext));
+                        /* An extended space's profile is its base's byte for
+                           byte.  Equality has to disagree even so. */
+                        snprintf(l, sizeof l, "ext/%s/%zu/eq_base", kind, i);
+                        b(l, CGColorSpaceEqualToColorSpace(ext, src));
+                    }
+                    if (xlin) {
+                        d = CGColorSpaceCopyICCData(xlin);
+                        snprintf(l, sizeof l, "xlin/%s/%zu/profile", kind, i);
+                        icc(l, d);
+                        if (d) CFRelease(d);
+                        snprintf(l, sizeof l, "xlin/%s/%zu/ext_range", kind, i);
+                        b(l, CGColorSpaceUsesExtendedRange(xlin));
+                        /* Identical profile to the linearized one, and still
+                           a different space. */
+                        snprintf(l, sizeof l, "xlin/%s/%zu/eq_lin", kind, i);
+                        b(l, CGColorSpaceEqualToColorSpace(xlin, lin));
+                    }
+                    if (lin) CGColorSpaceRelease(lin);
+                    if (ext) CGColorSpaceRelease(ext);
+                    if (xlin) CGColorSpaceRelease(xlin);
+                }
+            }
+
+            /* What is rejected: anything without a gray or RGB profile. */
+            {
+                static const char *const what[] = {
+                    "null", "device_rgb", "device_gray", "device_cmyk",
+                    "pattern", "pattern_colored", "lab",
+                };
+                CGColorSpaceRef rej[7];
+
+                rej[0] = NULL;
+                rej[1] = CGColorSpaceCreateDeviceRGB();
+                rej[2] = CGColorSpaceCreateDeviceGray();
+                rej[3] = CGColorSpaceCreateDeviceCMYK();
+                rej[4] = CGColorSpaceCreatePattern(CGColorSpaceCreateDeviceRGB());
+                rej[5] = CGColorSpaceCreatePattern(NULL);
+                rej[6] = CGColorSpaceCreateLab(d50, NULL, NULL);
+                for (i = 0; i < 7; i++) {
+                    snprintf(l, sizeof l, "lin/reject/%s/lin", what[i]);
+                    b(l, CGColorSpaceCreateLinearized(rej[i]) == NULL);
+                    snprintf(l, sizeof l, "lin/reject/%s/ext", what[i]);
+                    b(l, CGColorSpaceCreateExtended(rej[i]) == NULL);
+                    snprintf(l, sizeof l, "lin/reject/%s/xlin", what[i]);
+                    b(l, CGColorSpaceCreateExtendedLinearized(rej[i]) == NULL);
+                }
+                for (i = 0; i < 7; i++) {
+                    if (rej[i]) CGColorSpaceRelease(rej[i]);
+                }
+            }
+
+            /* The black point is dropped.  A base built with an explicit
+               black point and one built without have to linearize to the
+               same bytes: the tag is not in the linear profile at all, so
+               equality here is a statement about the profile, not about the
+               arguments. */
+            for (i = 0; i < 5; i++) {
+                for (int which = 0; which < 2; which++) {
+                    const char *kind = which ? "rgb" : "gray";
+                    CGColorSpaceRef def = which ? rgbbase[i] : graybase[i];
+                    CGColorSpaceRef wit = which ? rgbbp[i] : graybp[i];
+                    CGColorSpaceRef a = CGColorSpaceCreateLinearized(def);
+                    CGColorSpaceRef b2 = CGColorSpaceCreateLinearized(wit);
+                    CFDataRef da = a ? CGColorSpaceCopyICCData(a) : NULL;
+                    CFDataRef db = b2 ? CGColorSpaceCopyICCData(b2) : NULL;
+                    int same = 0;
+
+                    if (da && db &&
+                        CFDataGetLength(da) == CFDataGetLength(db) &&
+                        memcmp(CFDataGetBytePtr(da), CFDataGetBytePtr(db),
+                            (size_t)CFDataGetLength(da)) == 0)
+                        same = 1;
+                    snprintf(l, sizeof l, "lin/blackpoint/%s/%zu/eq", kind, i);
+                    b(l, a && CGColorSpaceEqualToColorSpace(a, b2));
+                    snprintf(l, sizeof l, "lin/blackpoint/%s/%zu/icc", kind, i);
+                    icc(l, da);
+                    snprintf(l, sizeof l, "lin/blackpoint/%s/%zu/same_bytes", kind, i);
+                    b(l, same);
+                    if (da) CFRelease(da);
+                    if (db) CFRelease(db);
+                    if (a) CGColorSpaceRelease(a);
+                    if (b2) CGColorSpaceRelease(b2);
+                }
+            }
+
+            /* Chaining.  Linearizing a linearized space appends the word to
+               the description again and grows the profile by the 22 bytes
+               the text occupies, so this is where the description handling is
+               actually pinned down; a builder that recomputed the
+               description from the model would report 276 bytes here and be
+               wrong.  Extending a linearized space keeps its profile. */
+            for (i = 0; i < 5; i++) {
+                for (int which = 0; which < 2; which++) {
+                    const char *kind = which ? "rgb" : "gray";
+                    CGColorSpaceRef src = which ? rgbbase[i] : graybase[i];
+                    CGColorSpaceRef l1 = CGColorSpaceCreateLinearized(src);
+                    CGColorSpaceRef l2 = CGColorSpaceCreateLinearized(l1);
+                    CGColorSpaceRef l3 = CGColorSpaceCreateLinearized(l2);
+                    CGColorSpaceRef e1 = CGColorSpaceCreateExtended(l1);
+                    CFDataRef d;
+
+                    if (l2) {
+                        d = CGColorSpaceCopyICCData(l2);
+                        snprintf(l, sizeof l, "lin/chain/%s/%zu/twice", kind, i);
+                        icc(l, d);
+                        if (d) CFRelease(d);
+                    }
+                    if (l3) {
+                        d = CGColorSpaceCopyICCData(l3);
+                        snprintf(l, sizeof l, "lin/chain/%s/%zu/thrice", kind, i);
+                        icc(l, d);
+                        if (d) CFRelease(d);
+                    }
+                    /* Two routes to the same place: linearizing the base
+                       twice, and linearizing the once-linearized space.  The
+                       results have to be equal *and* the same bytes. */
+                    if (l2 && l3) {
+                        CGColorSpaceRef direct =
+                            CGColorSpaceCreateLinearized(
+                                CGColorSpaceCreateLinearized(src));
+
+                        snprintf(l, sizeof l, "lin/chain/%s/%zu/route_eq", kind, i);
+                        b(l, CGColorSpaceEqualToColorSpace(l2, direct));
+                        if (direct) CGColorSpaceRelease(direct);
+                    }
+                    if (e1) {
+                        d = CGColorSpaceCopyICCData(e1);
+                        snprintf(l, sizeof l, "lin/chain/%s/%zu/ext_of_lin", kind, i);
+                        icc(l, d);
+                        if (d) CFRelease(d);
+                        /* The profile is the linearized one; the flags
+                           differ. */
+                        snprintf(l, sizeof l, "lin/chain/%s/%zu/ext_lin_eq", kind, i);
+                        b(l, CGColorSpaceEqualToColorSpace(e1,
+                            CGColorSpaceCreateExtendedLinearized(l1)));
+                    }
+                    /* A linearized space does not inherit its base's range:
+                       the flag is not carried over. */
+                    {
+                        static const CGFloat r4[4] = { 0.25, 0.5, 0.75, 1 };
+                        CGColorSpaceRef withr = which
+                            ? CGColorSpaceCreateCalibratedRGB(d50, r4, g222, idm)
+                            : CGColorSpaceCreateCalibratedGray(d50, NULL, 2.2);
+                        CGColorSpaceRef lr = CGColorSpaceCreateLinearized(withr);
+
+                        snprintf(l, sizeof l, "lin/chain/%s/%zu/no_range", kind, i);
+                        b(l, lr && CGColorSpaceEqualToColorSpace(lr,
+                            CGColorSpaceCreateLinearized(src)));
+                        if (lr) CGColorSpaceRelease(lr);
+                        if (withr) CGColorSpaceRelease(withr);
+                    }
+                    if (l1) CGColorSpaceRelease(l1);
+                    if (l2) CGColorSpaceRelease(l2);
+                    if (l3) CGColorSpaceRelease(l3);
+                    if (e1) CGColorSpaceRelease(e1);
+                }
+            }
+
+            /* A sweep over white points, so the copied colorants are pinned
+               down across the quantisation rather than at two values. */
+            for (i = 0; i < 24; i++) {
+                CGFloat wp[3];
+
+                for (k = 0; k < 3; k++)
+                    wp[k] = (CGFloat)(0.05 * (double)(i * 3 + k));
+                {
+                    CGColorSpaceRef src = CGColorSpaceCreateCalibratedRGB(wp,
+                        NULL, g222, p3m);
+                    CGColorSpaceRef lin = CGColorSpaceCreateLinearized(src);
+                    CFDataRef d = lin ? CGColorSpaceCopyICCData(lin) : NULL;
+
+                    snprintf(l, sizeof l, "lin/sweep/wp_%zu", i);
+                    icc(l, d);
+                    if (d) CFRelease(d);
+                    if (lin) CGColorSpaceRelease(lin);
+                    if (src) CGColorSpaceRelease(src);
+                }
+            }
+
+            /* And a sweep over gamma, which the linearized profile must not
+               depend on at all: every one of these is the same 396 bytes as
+               the gamma 2.2 case.  If the tone curve leaked through, these
+               would differ. */
+            for (i = 0; i < 12; i++) {
+                CGFloat g[3];
+
+                for (k = 0; k < 3; k++)
+                    g[k] = (CGFloat)(0.25 * (double)(i + 1 + k));
+                {
+                    CGColorSpaceRef src = CGColorSpaceCreateCalibratedRGB(d50,
+                        NULL, g, idm);
+                    CGColorSpaceRef lin = CGColorSpaceCreateLinearized(src);
+                    CGColorSpaceRef ref = CGColorSpaceCreateLinearized(
+                        CGColorSpaceCreateCalibratedRGB(d50, NULL, g222, idm));
+                    CFDataRef d = lin ? CGColorSpaceCopyICCData(lin) : NULL;
+
+                    snprintf(l, sizeof l, "lin/sweep/gamma_%zu/icc", i);
+                    icc(l, d);
+                    /* And equal to the reference, which is what says the
+                       gamma is gone rather than merely rounded. */
+                    snprintf(l, sizeof l, "lin/sweep/gamma_%zu/eq_ref", i);
+                    b(l, lin && CGColorSpaceEqualToColorSpace(lin, ref));
+                    if (d) CFRelease(d);
+                    if (lin) CGColorSpaceRelease(lin);
+                    if (ref) CGColorSpaceRelease(ref);
+                    if (src) CGColorSpaceRelease(src);
+                }
+            }
+
+            for (i = 0; i < 5; i++) {
+                CGColorSpaceRelease(graybase[i]);
+                CGColorSpaceRelease(rgbbase[i]);
+                CGColorSpaceRelease(graybp[i]);
+                CGColorSpaceRelease(rgbbp[i]);
+            }
+        }
+
         /* Pairwise equality, including pattern spaces with equal, different
            and absent bases. */
         for (size_t i = 0; i < nspaces; i++) {
