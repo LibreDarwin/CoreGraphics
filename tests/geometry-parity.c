@@ -2351,6 +2351,99 @@ int main(void)
                 }
             }
 
+            /* A DeviceN space takes its channel count and its device-class set
+               from the body its tags describe, not from its own signature, so
+               the signature is swept against three bodies: a gray one, an RGB
+               one and a Lab one.  The Lab body matters because it is the only
+               one here carrying the 'A2B0'/'B2A0' pair, which is the branch
+               that reads a LUT.
+
+               Two of the results are not obvious and both cost a probe to
+               find.  A gray body is never a valid DeviceN body -- every
+               'nCLR' is refused on it including '1CLR', which matters because
+               a gray profile does have exactly one channel, so this is not
+               the channel-count agreement doing the rejecting.  And the class
+               set follows the body: an RGB body relabelled 'HSV ' accepts
+               only 'mntr' and 'scnr', while a Lab body accepts all five. */
+            {
+                static const struct {
+                    const char *tag;
+                    const char *sig;
+                } dsigs[] = {
+                    { "hsv", "HSV " }, { "cmy", "CMY " }, { "yxy", "Yxy " },
+                    { "luv", "Luv " }, { "hls", "HLS " },
+                    { "1clr", "1CLR" }, { "2clr", "2CLR" }, { "3clr", "3CLR" },
+                    { "4clr", "4CLR" }, { "5clr", "5CLR" }, { "6clr", "6CLR" },
+                    { "9clr", "9CLR" }, { "0clr", "0CLR" }, { "aclr", "ACLR" },
+                    { "clr", "CLR " }, { "ycbr", "YCbr" }, { "4clr-lower", "4cLR" },
+                };
+                static const char *const classes[] = {
+                    "mntr", "scnr", "prtr", "spac", "abst",
+                };
+                struct { const char *n; CGColorSpaceRef ref; } bodies[3];
+                size_t bi, si, ci;
+
+                bodies[0].n = "gray";
+                bodies[0].ref = CGColorSpaceCreateCalibratedGray(icc_d50, NULL, 2.2);
+                bodies[1].n = "rgb";
+                bodies[1].ref = CGColorSpaceCreateCalibratedRGB(icc_d50, NULL,
+                    icc_g222, icc_idm);
+                bodies[2].n = "lab";
+                bodies[2].ref = CGColorSpaceCreateLab(icc_d50, NULL, NULL);
+
+                for (bi = 0; bi < 3; bi++) {
+                    CFDataRef bd = bodies[bi].ref
+                        ? CGColorSpaceCopyICCData(bodies[bi].ref) : NULL;
+                    size_t bl = bd ? (size_t)CFDataGetLength(bd) : 0;
+
+                    for (si = 0; si < sizeof dsigs / sizeof dsigs[0]; si++) {
+                        unsigned char *bb = (unsigned char *)malloc(bl);
+                        CFDataRef dd;
+                        CGColorSpaceRef s;
+
+                        memcpy(bb, CFDataGetBytePtr(bd), bl);
+                        memcpy(bb + 16, dsigs[si].sig, 4);
+                        dd = CFDataCreate(kCFAllocatorDefault, bb, (CFIndex)bl);
+                        s = CGColorSpaceCreateWithICCData(dd);
+                        snprintf(l, sizeof l, "icc/devicen/%s/%s/ok",
+                            bodies[bi].n, dsigs[si].tag);
+                        b(l, s != NULL);
+                        if (s) {
+                            snprintf(l, sizeof l,
+                                "icc/devicen/%s/%s/model", bodies[bi].n,
+                                dsigs[si].tag);
+                            n(l, (long long)CGColorSpaceGetModel(s));
+                            snprintf(l, sizeof l,
+                                "icc/devicen/%s/%s/ncomp", bodies[bi].n,
+                                dsigs[si].tag);
+                            n(l, (long long)CGColorSpaceGetNumberOfComponents(s));
+                        }
+                        CGColorSpaceRelease(s);
+                        CFRelease(dd);
+
+                        /* And the class byte, over the two bodies whose
+                           class sets differ. */
+                        for (ci = 0; bi != 0 && ci < 5; ci++) {
+                            memcpy(bb, CFDataGetBytePtr(bd), bl);
+                            memcpy(bb + 16, dsigs[si].sig, 4);
+                            memcpy(bb + 12, classes[ci], 4);
+                            dd = CFDataCreate(kCFAllocatorDefault, bb,
+                                (CFIndex)bl);
+                            s = CGColorSpaceCreateWithICCData(dd);
+                            snprintf(l, sizeof l, "icc/devcls/%s/%s/%s",
+                                bodies[bi].n, dsigs[si].tag, classes[ci]);
+                            b(l, s != NULL);
+                            CGColorSpaceRelease(s);
+                            CFRelease(dd);
+                        }
+                        free(bb);
+                    }
+                    if (bd) CFRelease(bd);
+                }
+                for (bi = 0; bi < 3; bi++)
+                    if (bodies[bi].ref) CGColorSpaceRelease(bodies[bi].ref);
+            }
+
             for (i2 = 0; i2 < nn; i2++)
                 if (srcspace[i2]) CGColorSpaceRelease(srcspace[i2]);
         }

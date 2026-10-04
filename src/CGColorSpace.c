@@ -1714,7 +1714,10 @@ CGColorSpaceRef CGColorSpaceCreateExtended(CGColorSpaceRef baseSpace)
    `required' receives the tags Apple insists on for the mapped model, and
    `nclass' how many device classes it accepts.  Both vary by signature and
    were measured by dropping tags one at a time and rewriting the class byte;
-   see the comment on the caller for the tables. */
+   see the comment on the caller for the tables.  For the DeviceN signatures
+   both are placeholders the caller replaces from the body, since a DeviceN
+   space takes its requirements and its class set from what the tags describe
+   rather than from its own name. */
 static int icc_model_for(const unsigned char *sig, CGColorSpaceModel *model,
     size_t *ncomp, const char *const **required, int *nclass)
 {
@@ -1790,29 +1793,31 @@ static int icc_has(const unsigned char *p, uint32_t count, const char *sig)
 }
 
 /* A DeviceN profile's tags still form one of the models above, and that is
-   what its mandatory tags and channel count are.  The tag sets are disjoint
-   enough to tell gray and RGB apart outright: gray carries 'kTRC', RGB carries
-   the colorants and Tone tags.  CMYK, Lab and XYZ all carry the same
-   'A2B0'/'B2A0' pair and are not separable from the tags, but they differ in
-   channel count and only four of the three-channel models exists -- so the
-   one four-channel case is settled from the signature, which is still the
-   original 'CMYK' on a profile whose model is DeviceN. */
+   what its mandatory tags, channel count and device-class set are.  Only the
+   colorants and the 'A2B0'/'B2A0' pair are read: dropping 'gamt', 'A2B1',
+   'A2B2', 'B2A1', 'B2A2' or 'bkpt' leaves acceptance alone, and dropping
+   either LUT ends it.  CMYK, Lab and XYZ all carry the same 'A2B0'/'B2A0' pair
+   and are not separable from the tags, but they differ in channel count and
+   only one of the three-channel models exists -- so the one four-channel case
+   is settled from the signature, which is still the original 'CMYK' on a
+   profile whose model is DeviceN.
+
+   That last part is known to be incomplete: Apple accepts '4CLR' on a CMYK
+   body and reports four channels, and no mutation tried here reproduces the
+   channel count without also breaking the profile -- setting A2B0's
+   inputChannels to 3 on the same body still refuses '3CLR'.  So the count is
+   read from somewhere inside the LUT that has not been isolated, and 'CMYK'
+   is a stand-in that covers only the signature-as-shipped case. */
 static int icc_body_model(const unsigned char *p, uint32_t count,
     CGColorSpaceModel *model, size_t *ncomp, const char *const **required,
     int *nclass)
 {
-    static const char *const gray[] = { "kTRC", NULL };
     static const char *const rgb[] = {
         "rXYZ", "gXYZ", "bXYZ", "rTRC", "gTRC", "bTRC", NULL
     };
     static const char *const cmyk[] = { "A2B0", "B2A0", NULL };
     static const char *const xyz[] = { "A2B0", "B2A0", NULL };
 
-    if (icc_has(p, count, "kTRC") && !icc_has(p, count, "rXYZ")
-        && !icc_has(p, count, "A2B0")) {
-        *model = kCGColorSpaceModelMonochrome; *ncomp = 1;
-        *required = gray; *nclass = 3; return 1;
-    }
     if (icc_has(p, count, "rXYZ") || icc_has(p, count, "gXYZ")
         || icc_has(p, count, "bXYZ")) {
         *model = kCGColorSpaceModelRGB; *ncomp = 3;
@@ -1829,6 +1834,13 @@ static int icc_body_model(const unsigned char *p, uint32_t count,
         }
         *nclass = 5; return 1;
     }
+    /* A gray body is deliberately not matched here.  Every 'nCLR' and every
+       three-channel DeviceN name is refused on a gray profile, '1CLR'
+       included -- and a gray profile does have exactly one channel, so this is
+       not the channel-count agreement doing the rejecting.  A gray body has no
+       'A2B0'/'B2A0' pair either, and dropping tags one at a time shows those
+       two are the only ones the DeviceN path reads: removing 'gamt', 'A2B1',
+       'A2B2' or 'bkpt' changes nothing, while removing either LUT does. */
     return 0;
 }
 
@@ -1946,6 +1958,12 @@ CGColorSpaceRef CGColorSpaceCreateWithICCData(CFDataRef data)
             if (bn != ncomp)
                 return NULL;
             required = breq;
+            /* The class set is the body's too, not DeviceN's own.  An RGB body
+               relabelled 'HSV ' accepts only 'mntr' and 'scnr', the same two an
+               RGB profile accepts, while a CMYK or Lab body accepts all five.
+               So the check follows the body even though the model reported is
+               DeviceN. */
+            nclass = bcl;
         }
     }
     if (!icc_class_ok(p + CGICCDeviceClassOffset, nclass))
