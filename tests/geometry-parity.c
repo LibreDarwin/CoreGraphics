@@ -2531,6 +2531,143 @@ int main(void)
                 if (srcspace[i2]) CGColorSpaceRelease(srcspace[i2]);
         }
 
+        /* CGColorSpaceCreateIndexed.  The table is (last + 1) * the base's
+           component count bytes, with no pad byte in front of an entry, and
+           the 256-entry ceiling is a property of the table rather than of the
+           base -- all of which the guard-page probe in the report confirmed by
+           reading exactly three bytes per entry on an RGB base and one on a
+           gray one before faulting. */
+        {
+            static const size_t lasts[] = { 0, 1, 2, 15, 16, 254, 255, 256, 257 };
+            static const char *const ishort[] = { "gray", "rgb", "cmyk", "lab" };
+            CGColorSpaceRef named[4];
+            size_t ni;
+
+            /* The four base kinds Apple was measured on.  The named spaces
+               would be a fifth, but CGColorSpaceCreateWithName is a later
+               milestone, and GenericRGB turned out to behave exactly like
+               DeviceRGB here anyway -- the 256-entry ceiling is on the table,
+               not on the base. */
+            named[0] = CGColorSpaceCreateDeviceGray();
+            named[1] = CGColorSpaceCreateDeviceRGB();
+            named[2] = CGColorSpaceCreateDeviceCMYK();
+            { CGColorSpaceRef w = CGColorSpaceCreateDeviceRGB();
+              named[3] = CGColorSpaceCreateLab(w, NULL, NULL);
+              if (w) CGColorSpaceRelease(w); }
+            for (ni = 0; ni < 4; ni++) {
+                size_t nc = named[ni]
+                    ? CGColorSpaceGetNumberOfComponents(named[ni]) : 0;
+                size_t li;
+
+                for (li = 0; li < sizeof lasts / sizeof lasts[0]; li++) {
+                    size_t last = lasts[li];
+                    size_t bytes = (last + 2) * (nc + 1) + 64;
+                    unsigned char *t = malloc(bytes);
+                    CGColorSpaceRef s;
+
+                    for (size_t k = 0; k < bytes; k++)
+                        t[k] = (unsigned char)(k * 7u + 1u);
+                    s = CGColorSpaceCreateIndexed(named[ni], last, t);
+                    snprintf(l, sizeof l, "idx/%s/last%zu", ishort[ni], last);
+                    b(l, s != NULL);
+                    if (s) {
+                        snprintf(l, sizeof l, "idx/%s/last%zu/model",
+                            ishort[ni], last);
+                        b(l, CGColorSpaceGetModel(s) == kCGColorSpaceModelIndexed);
+                        snprintf(l, sizeof l, "idx/%s/last%zu/ncomp",
+                            ishort[ni], last);
+                        b(l, CGColorSpaceGetNumberOfComponents(s) == 1);
+                        snprintf(l, sizeof l, "idx/%s/last%zu/name",
+                            ishort[ni], last);
+                        cfstr(l, CGColorSpaceCopyName(s));
+                        snprintf(l, sizeof l, "idx/%s/last%zu/icc",
+                            ishort[ni], last);
+                        b(l, CGColorSpaceCopyICCData(s) != NULL);
+                        snprintf(l, sizeof l, "idx/%s/last%zu/out",
+                            ishort[ni], last);
+                        b(l, CGColorSpaceSupportsOutput(s));
+                        snprintf(l, sizeof l, "idx/%s/last%zu/base",
+                            ishort[ni], last);
+                        b(l, CGColorSpaceEqualToColorSpace(
+                                CGColorSpaceGetBaseColorSpace(s), named[ni]));
+                        CGColorSpaceRelease(s);
+                    }
+                    free(t);
+                }
+                if (named[ni]) CGColorSpaceRelease(named[ni]);
+            }
+
+            /* A base that cannot be expanded into: NULL, a pattern space, an
+               indexed space.  The pattern space reports three components on an
+               RGB base, so its count looks perfectly ordinary and only the
+               model gives it away. */
+            {
+                unsigned char t[16] = { 0, 1, 2, 3, 4, 5, 6, 7,
+                                        8, 9, 10, 11, 12, 13, 14, 15 };
+                CGColorSpaceRef pat = CGColorSpaceCreatePattern(
+                    CGColorSpaceCreateDeviceRGB());
+                CGColorSpaceRef inner = CGColorSpaceCreateIndexed(
+                    CGColorSpaceCreateDeviceRGB(), 3, t);
+
+                for (size_t which = 0; which < 3; which++) {
+                    CGColorSpaceRef base = which == 0 ? NULL
+                        : which == 1 ? pat : inner;
+                    snprintf(l, sizeof l, "idx/base/%zu", which);
+                    b(l, CGColorSpaceCreateIndexed(base, 3, t) != NULL);
+                }
+                if (pat) CGColorSpaceRelease(pat);
+                if (inner) CGColorSpaceRelease(inner);
+            }
+
+            /* A NULL table is refused, and the contents are never inspected:
+               every fill, including all-zero and all-0xff, is accepted. */
+            {
+                unsigned char z[12] = { 0 }, f[12] = {
+                    0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                    0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+                CGColorSpaceRef rgb = CGColorSpaceCreateDeviceRGB();
+                CGColorSpaceRef s;
+
+                b("idx/nulltable", CGColorSpaceCreateIndexed(rgb, 3, NULL) != NULL);
+                s = CGColorSpaceCreateIndexed(rgb, 3, z);
+                b("idx/content/zeros", s != NULL);
+                if (s) CGColorSpaceRelease(s);
+                s = CGColorSpaceCreateIndexed(rgb, 3, f);
+                b("idx/content/ff", s != NULL);
+                if (s) CGColorSpaceRelease(s);
+                CGColorSpaceRelease(rgb);
+            }
+
+            /* Identity: same base and same table are equal; a differing
+               table, a differing base or a differing `last' are not.  All
+               three would compare equal if only the shape were compared, since
+               every indexed space reports model 5 and one component. */
+            {
+                unsigned char t1[12] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+                unsigned char t2[12] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12 };
+                CGColorSpaceRef rgb = CGColorSpaceCreateDeviceRGB();
+                CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
+                CGColorSpaceRef a = CGColorSpaceCreateIndexed(rgb, 3, t1);
+                CGColorSpaceRef a2 = CGColorSpaceCreateIndexed(rgb, 3, t1);
+                CGColorSpaceRef d = CGColorSpaceCreateIndexed(rgb, 3, t2);
+                CGColorSpaceRef g = CGColorSpaceCreateIndexed(gray, 3, t1);
+                CGColorSpaceRef e = CGColorSpaceCreateIndexed(rgb, 2, t1);
+
+                b("idx/eq/self", CGColorSpaceEqualToColorSpace(a, a2));
+                b("idx/eq/table", CGColorSpaceEqualToColorSpace(a, d));
+                b("idx/eq/base", CGColorSpaceEqualToColorSpace(a, g));
+                b("idx/eq/last", CGColorSpaceEqualToColorSpace(a, e));
+                b("idx/eq/vsbase", CGColorSpaceEqualToColorSpace(a, rgb));
+                CGColorSpaceRelease(a);
+                CGColorSpaceRelease(a2);
+                CGColorSpaceRelease(d);
+                CGColorSpaceRelease(g);
+                CGColorSpaceRelease(e);
+                CGColorSpaceRelease(rgb);
+                CGColorSpaceRelease(gray);
+            }
+        }
+
         /* Pairwise equality, including pattern spaces with equal, different
            and absent bases. */
         for (size_t i = 0; i < nspaces; i++) {

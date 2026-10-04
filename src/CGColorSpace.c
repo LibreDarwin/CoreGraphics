@@ -64,6 +64,11 @@ enum {
     CGColorSpaceTypeCMYK = 2,
     CGColorSpaceTypeLab = 5,
     CGColorSpaceTypePattern = 9,
+    /* What CGColorSpaceGetType reports for an indexed space, and the only
+       value here that does not come from the base: an indexed space reports 7
+       whether its base is gray, RGB or CMYK, so this tag cannot be derived
+       from the model the way the device spaces' can. */
+    CGColorSpaceTypeIndexed = 7,
     /* What CGColorSpaceGetType reports for any space built from an ICC
        profile, whatever the profile's colour model.  Verified by reading the
        private CGColorSpaceGetType off a space built by
@@ -124,6 +129,15 @@ struct CGColorSpace {
        neither.  Deriving it from the profile would mean looking for an
        identity tone curve, which is what the flag records. */
     bool linearized;
+    /* An indexed space's lookup table, owned, and the largest index in it.
+       NULL for every other space, which is what makes an indexed space
+       distinguishable from a base-less one without consulting the model.
+       The table is (last + 1) * (base's components) bytes and is copied out
+       of the caller's buffer, so the caller's array need not outlive the
+       call. */
+    unsigned char *indexed;
+    size_t indexedLen;
+    size_t lastIndex;
 };
 
 
@@ -135,17 +149,20 @@ struct CGColorSpace {
    "Device RGB". */
 static struct CGColorSpace CGColorSpaceDeviceGrayState = {
     0, true, kCGColorSpaceModelMonochrome, CGColorSpaceTypeMonochrome, 1,
-    "kCGColorSpaceDeviceGray", NULL, NULL, 0, false, { 0, 0, 0, 0 }, false, false
+    "kCGColorSpaceDeviceGray", NULL, NULL, 0, false, { 0, 0, 0, 0 }, false, false,
+    NULL, 0, 0
 };
 
 static struct CGColorSpace CGColorSpaceDeviceRGBState = {
     0, true, kCGColorSpaceModelRGB, CGColorSpaceTypeRGB, 3,
-    "kCGColorSpaceDeviceRGB", NULL, NULL, 0, false, { 0, 0, 0, 0 }, false, false
+    "kCGColorSpaceDeviceRGB", NULL, NULL, 0, false, { 0, 0, 0, 0 }, false, false,
+    NULL, 0, 0
 };
 
 static struct CGColorSpace CGColorSpaceDeviceCMYKState = {
     0, true, kCGColorSpaceModelCMYK, CGColorSpaceTypeCMYK, 4,
-    "kCGColorSpaceDeviceCMYK", NULL, NULL, 0, false, { 0, 0, 0, 0 }, false, false
+    "kCGColorSpaceDeviceCMYK", NULL, NULL, 0, false, { 0, 0, 0, 0 }, false, false,
+    NULL, 0, 0
 };
 
 /* The name a pattern space reports when it has no base.  A pattern space
@@ -300,6 +317,61 @@ CGColorSpaceRef CGColorSpaceCreatePattern(CGColorSpaceRef baseSpace)
     s->base = base;
     if (base)
         CGColorSpaceRetain(baseSpace);
+    return s;
+}
+
+/* Create an indexed color space.  `lastIndex' names the largest valid index,
+   so the table holds lastIndex + 1 entries of base->ncomp bytes each -- the
+   size Apple's header documents, and the one confirmed here by placing the
+   table flush against a PROT_NONE page: a three-byte-per-entry table survives
+   on an RGB base and faults on the fourth byte, a one-byte one survives on a
+   gray base, and a four-byte one survives on CMYK.  There is no pad or alpha
+   byte in front of an entry, which is the first thing worth getting wrong.
+
+   The 256-entry ceiling is Apple's, and it is a property of the table rather
+   than of the base: lastIndex 255 is accepted on a gray base and on a CMYK
+   base alike, and 256 is refused on both. */
+CGColorSpaceRef CGColorSpaceCreateIndexed(CGColorSpaceRef baseSpace,
+    size_t lastIndex, const unsigned char *colorTable)
+{
+    struct CGColorSpace *s;
+    struct CGColorSpace *base = baseSpace;
+    size_t bytes;
+
+    if (!base || !colorTable || lastIndex > 255)
+        return NULL;
+    /* An indexed space expands an index into the base's components, so the
+       base has to be a space that has components to expand into -- and the
+       component count has to mean what it says.  Two models report a count
+       that would otherwise pass and cannot be expanded: a pattern space,
+       which is a paint rather than a place a color can live (and which
+       reports 3 on an RGB base, so its count looks ordinary), and an indexed
+       space, which is already an index.  Both are refused. */
+    if (base->model == kCGColorSpaceModelPattern
+        || base->model == kCGColorSpaceModelIndexed)
+        return NULL;
+    bytes = (lastIndex + 1) * base->ncomp;
+    s = calloc(1, sizeof *s);
+    if (!s)
+        return NULL;
+    s->indexed = malloc(bytes ? bytes : 1);
+    if (!s->indexed) {
+        free(s);
+        return NULL;
+    }
+    s->refcount = 1;
+    s->model = kCGColorSpaceModelIndexed;
+    s->type = CGColorSpaceTypeIndexed;
+    /* One component, whatever the base has: the component of an indexed space
+       is the index itself, which is why a gray-based one reports 1 as well as
+       a CMYK-based one. */
+    s->ncomp = 1;
+    s->name = NULL;
+    s->base = base;
+    CGColorSpaceRetain(baseSpace);
+    memcpy(s->indexed, colorTable, bytes);
+    s->indexedLen = bytes;
+    s->lastIndex = lastIndex;
     return s;
 }
 
@@ -2084,6 +2156,7 @@ void CGColorSpaceRelease(CGColorSpaceRef space)
         s->base = NULL;
     }
     free(s->profile);
+    free(s->indexed);
     free(s);
 }
 
@@ -2229,6 +2302,25 @@ bool CGColorSpaceEqualToColorSpace(CGColorSpaceRef space1,
        CGColorSpaceEqualToColorSpace(Pattern(rgb), rgb). */
     if (a->type == CGColorSpaceTypePattern || b->type == CGColorSpaceTypePattern)
         return false;
+    /* Two indexed spaces are equal when they are the same lookup: same base,
+       same table, same length.  Comparing the shape alone would call every
+       pair of indexed spaces equal, since they all report model 5 and one
+       component, so the table has to be compared -- and the length with it,
+       because two tables can share a prefix and differ only by carrying
+       different numbers of entries, which is exactly what changing the largest
+       index does. */
+    if (a->type == CGColorSpaceTypeIndexed || b->type == CGColorSpaceTypeIndexed) {
+        if (a->type != b->type)
+            return false;
+        if (a->indexedLen != b->indexedLen)
+            return false;
+        if (!CGColorSpaceEqualToColorSpace(a->base, b->base))
+            return false;
+        if (a->indexedLen
+            && memcmp(a->indexed, b->indexed, a->indexedLen) != 0)
+            return false;
+        return true;
+    }
     /* A space with a profile is compared by that profile, so two calibrated
        spaces built from the same white point, black point and gamma are
        equal however they were built, and two built from different ones are
@@ -2293,9 +2385,11 @@ bool CGColorSpaceSupportsOutput(CGColorSpaceRef space)
 {
     struct CGColorSpace *s = space;
 
-    /* A pattern space describes a paint, not somewhere to paint, so it
-       cannot be a drawing destination. */
-    return s != NULL && s->type != CGColorSpaceTypePattern;
+    /* A pattern space describes a paint, not somewhere to paint, and an
+       indexed space describes a lookup rather than a place a drawing can land,
+       so neither can be a drawing destination. */
+    return s != NULL && s->type != CGColorSpaceTypePattern
+        && s->type != CGColorSpaceTypeIndexed;
 }
 
 bool CGColorSpaceIsHDR(CGColorSpaceRef space)

@@ -89,6 +89,26 @@ CG_EXTERN CGColorSpaceRef CGColorSpaceCreateDeviceCMYK(void);
 CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
     CGColorSpaceRef __nullable baseSpace);
 
+/* Create an indexed color space from a lookup table.  `lastIndex' is the
+   largest valid index and must be at most 255; `colorTable' is an array of
+   `(CGColorSpaceGetNumberOfComponents(baseSpace)) * (lastIndex + 1)` bytes,
+   one entry per index, and is copied.  Each byte scales to the range of the
+   corresponding component of the base.
+
+   The result has one component -- the index -- and reports
+   kCGColorSpaceModelIndexed however many the base has; `baseSpace' is
+   retained and is what CGColorSpaceGetBaseColorSpace answers.  A NULL base,
+   a base that is itself indexed or is a pattern space, and a `lastIndex'
+   above 255 all yield NULL.
+
+   The bound is on the table rather than on the base: 256 entries are accepted
+   on a one-component gray base just as on a four-component CMYK one, and 257
+   are refused on all of them. */
+CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateIndexed(
+    CGColorSpaceRef __nullable baseSpace,
+    size_t lastIndex,
+    const unsigned char * __nullable colorTable);
+
 /* Create a calibrated gray color space carrying an ICC profile that this
    framework synthesises.  `whitePoint' is the diffuse white point in CIE
    1931 XYZ, `blackPoint' the diffuse black point, defaulting to zero when
