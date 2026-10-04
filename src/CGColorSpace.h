@@ -25,7 +25,7 @@
      - CreateLinearized, CreateExtended and their Extended variants,
      - CreateICCBased, CreateWithICCData, CreateWithICCProfile,
        CreateWithColorSyncProfile, CreateWithURL, CreatePlatformProfile,
-     - CreateWithID, and CreateWithName for all but nineteen names, since
+     - CreateWithID, and CreateWithName for all but seventeen names, since
        the rest resolve to embedded profiles.
 
    The three calibrated spaces do synthesise a profile, and the size varies
@@ -97,14 +97,16 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
    the wrong case and any trailing text.  A mutable CFString resolves on its
    contents exactly as an immutable constant does.
 
-   Five names resolve in this step -- the three device names,
-   kCGColorSpaceColoredPattern and kCGColorSpaceGenericLab.  The rest yield
-   NULL, because they resolve to spaces carrying embedded profiles this step
-   cannot emit yet.  That set is neither the identifier table nor a subset of
-   it: of the 45 name constants reachable through the API, 40 resolve and 5
-   return NULL, and eight of the resolving names are absent from the table that
-   CGColorSpaceIDFromName and CGColorSpaceNameFromID use.  So this accepts
-   names that have no identifier, and refuses names that do.
+   The names that resolve here are of two kinds.  Five need no profile of
+   their own -- the three device names, kCGColorSpaceColoredPattern and
+   kCGColorSpaceGenericLab -- and the eighteen described below are assembled
+   from recovered constants.  Every other name yields NULL, because it resolves
+   to a space carrying an embedded profile this step cannot emit yet.  That set
+   is neither the identifier table nor a subset of it: of the 45 name constants
+   reachable through the API, 40 resolve and 5 return NULL, and eight of the
+   resolving names are absent from the table that CGColorSpaceIDFromName and
+   CGColorSpaceNameFromID use.  So this accepts names that have no identifier,
+   and refuses names that do.
 
    The three device names answer the process-lifetime singletons, identical to
    what CGColorSpaceCreateDeviceGray, ...DeviceRGB and ...DeviceCMYK return.
@@ -136,7 +138,24 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
    bytes, so for an ICC space the extended flag has to be consulted alongside
    the colorants rather than after them.
 
-   Every other name returns NULL for now; the remaining nineteen resolve to
+   That override is confined to RGB, because a gray profile has no primaries
+   to be wider than anything: kCGColorSpaceExtendedLinearGray reports an
+   extended range and is nevertheless not wide gamut, so letting the flag stand
+   on its own would call it one.
+
+   Two more resolve to a profile of quite another shape:
+   kCGColorSpaceLinearGray and kCGColorSpaceExtendedLinearGray share a single
+   356-byte v2.1 profile, which is a monochrome/TRC one rather than a
+   colorimetric RGB: four tags instead of ten or eleven, a legacy 'desc' and
+   'text' where the v4 profiles carry 'mluc' records, no colorants at all, and
+   one tone curve where they carry three.  The extended name takes the same 356
+   bytes as its base and is told apart only by the extended-range flag, exactly
+   as the three extended RGB aliases are, and neither is wide gamut -- the
+   first of the two things a gray profile settles, since it has no primaries to
+   be wider than anything.  It is not the device gray either: the profile is
+   what distinguishes them.
+
+   Every other name returns NULL for now; the remaining seventeen resolve to
    embedded profiles, which the rest of this file's constructors do not yet
    assemble. */
 CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateWithName(

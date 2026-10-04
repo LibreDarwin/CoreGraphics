@@ -2758,7 +2758,7 @@ int main(void)
 
         /* CreateWithName.  Only names whose answers agree are recorded here.
            Apple resolves 40 of the 45 name constants and this step resolves
-           twenty-one, so the other 19 would be a mismatch rather than a test and
+           twenty-three, so the other 17 would be a mismatch rather than a test and
            each one joins this family as its profile template lands.  What is
            recorded is the part that is not obvious from the name: that the
            device names answer the existing singletons, that a pattern name
@@ -2772,6 +2772,11 @@ int main(void)
                 "kCGColorSpaceDeviceCMYK",
                 "kCGColorSpaceColoredPattern",
                 "kCGColorSpaceGenericLab",
+                /* The one v2.1 profile, carrying two names: it is a gray
+                   space and so reports one component and no primaries, and
+                   the extended name takes the same 356 bytes as its base. */
+                "kCGColorSpaceLinearGray",
+                "kCGColorSpaceExtendedLinearGray",
                 /* The eleven v4 profiles, which between them carry sixteen
                    names: the three extended-range aliases take the same
                    profile bytes as their base and differ only in the name and
@@ -2838,7 +2843,13 @@ int main(void)
                    first, and Rec. ITU-R BT.709-5 has primaries wider than
                    sRGB's yet is not called wide gamut.  Linear sRGB is the
                    sharper case of that: the same profile bytes answer false
-                   on their own and true on the extended-range alias. */
+                   on their own and true on the extended-range alias.
+
+                   Extended linear gray is the case that fixes the rule in the
+                   other direction: it reports an extended range and is still
+                   not wide gamut, so the override that makes the linearized
+                   RGB aliases wide cannot stand on its own and has to be
+                   confined to spaces that have primaries at all. */
                 int extended;
                 int wide;
             } expect[] = {
@@ -2847,6 +2858,8 @@ int main(void)
                 { kCGColorSpaceModelCMYK, 4, 2, 1, 0, 0 },       /* DeviceCMYK */
                 { kCGColorSpaceModelPattern, 0, 9, 0, 0, 0 },    /* ColoredPattern */
                 { kCGColorSpaceModelLab, 3, 5, 1, 0, 0 },        /* GenericLab */
+                { kCGColorSpaceModelMonochrome, 1, 6, 1, 0, 0 }, /* LinearGray */
+                { kCGColorSpaceModelMonochrome, 1, 6, 1, 1, 0 }, /* Extended LinearGray */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* DisplayP3 */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 1, 1 },        /* Extended DisplayP3 */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 0 },        /* ITUR_709 */
@@ -2923,6 +2936,46 @@ int main(void)
                 snprintf(l, sizeof l, "nm/near/%zu", i);
                 b(l, CGColorSpaceCreateWithName(s) == NULL);
                 CFRelease(s);
+            }
+
+            /* The extended-range alias and the space it is named after, one
+               pair at a time.  Every pair shares its profile byte for byte and
+               differs only in the flag, so the two functions answer opposite
+               ways: unequal, and then equal once the range is ignored.  The
+               equality matrix above cannot reach this, since it covers only
+               the device and pattern spaces and none of those has a range.
+
+               Linear gray is here for the same reason as the rest and with
+               nothing extra to say: it is an alias like the others, and the
+               fact that it is not wide gamut is asserted in the table above. */
+            {
+                static const char *const alias[][2] = {
+                    { "kCGColorSpaceDisplayP3", "kCGColorSpaceExtendedDisplayP3" },
+                    { "kCGColorSpaceLinearSRGB", "kCGColorSpaceExtendedLinearSRGB" },
+                    { "kCGColorSpaceLinearDisplayP3", "kCGColorSpaceExtendedLinearDisplayP3" },
+                    { "kCGColorSpaceLinearITUR_2020", "kCGColorSpaceExtendedLinearITUR_2020" },
+                    { "kCGColorSpaceITUR_2020", "kCGColorSpaceExtendedITUR_2020" },
+                    { "kCGColorSpaceLinearGray", "kCGColorSpaceExtendedLinearGray" },
+                };
+                const size_t nal = sizeof alias / sizeof alias[0];
+
+                for (i = 0; i < nal; i++) {
+                    CFStringRef bs = CFStringCreateWithCString(NULL,
+                        alias[i][0], kCFStringEncodingUTF8);
+                    CFStringRef es = CFStringCreateWithCString(NULL,
+                        alias[i][1], kCFStringEncodingUTF8);
+                    CGColorSpaceRef bsp = CGColorSpaceCreateWithName(bs);
+                    CGColorSpaceRef esp = CGColorSpaceCreateWithName(es);
+
+                    snprintf(l, sizeof l, "nm/alias/%zu/eq", i);
+                    b(l, CGColorSpaceEqualToColorSpace(bsp, esp));
+                    snprintf(l, sizeof l, "nm/alias/%zu/eqrange", i);
+                    b(l, CGColorSpaceEqualToColorSpaceIgnoringRange(bsp, esp));
+                    CFRelease(bs);
+                    CFRelease(es);
+                    CGColorSpaceRelease(bsp);
+                    CGColorSpaceRelease(esp);
+                }
             }
 
             /* Identity with the device constructors, which is a stronger

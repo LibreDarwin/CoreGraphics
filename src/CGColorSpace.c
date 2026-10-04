@@ -198,11 +198,15 @@ static struct CGColorSpace CGColorSpaceDeviceCMYKState = {
    first call this is null. */
 static struct CGColorSpace *CGColorSpaceGenericLabState;
 
-/* Declared ahead of its first use by CGColorSpaceCreateWithName: the ten names
-   that resolve to the eight ten-tag v4 profiles are built here, and the
+/* Declared ahead of its first use by CGColorSpaceCreateWithName: the sixteen
+   names that resolve to the eleven ten-tag v4 profiles are built here, and the
    definition sits with the profile emitters.  It answers NULL for any other
    name, which is how CGColorSpaceCreateWithName falls through. */
 static CGColorSpaceRef CGColorSpaceCreateNamedRGBV4(CFStringRef name);
+
+/* The same arrangement for the two gray names, which resolve to a single v2.1
+   profile of a rather different shape. */
+static CGColorSpaceRef CGColorSpaceCreateNamedGrayV2(CFStringRef name);
 
 /* The name a pattern space reports when it has no base.  A pattern space
    built on a base has no name of its own, so this is the only pattern name
@@ -452,10 +456,19 @@ CGColorSpaceRef CGColorSpaceCreateWithName(CFStringRef name)
        the v4 template, and CGColorSpaceCreateNamedRGBV4 answers for exactly
        those sixteen -- including the three extended-range aliases, which take
        the same profile bytes as their base and differ only in the name they
-       report and the extended flag they carry.
+       report and the extended flag they carry. */
+    {
+        CGColorSpaceRef gray = CGColorSpaceCreateNamedGrayV2(name);
 
-       The names it does not own fall through to the same NULL the other 24
-       produce, of which five are names Apple refuses too. */
+        /* Two more are gray rather than RGB, so they get their own v2.1
+           template, and the extended one is an alias of the other in the same
+           way.  Asked first because it is the shorter list of the two. */
+        if (gray)
+            return gray;
+    }
+
+    /* The names neither template owns fall through to the same NULL the other
+       24 produce, of which five are names Apple refuses too. */
     return CGColorSpaceCreateNamedRGBV4(name);
 }
 
@@ -1114,6 +1127,42 @@ static size_t put_mluc(unsigned char *p, const char *utf8)
     return 28 + 2 * chars;
 }
 
+/* 'text', the tag the copyright uses in a v2 profile where the v4 template
+   uses an 'mluc'.  It is a signature, four reserved bytes, and then the string
+   with its terminator and nothing else -- no length field, so the block is
+   exactly eight bytes longer than the text. */
+static size_t put_text(unsigned char *p, const char *ascii)
+{
+    size_t n = strlen(ascii);
+
+    memcpy(p, "text", 4);
+    put_be32(p + 4, 0);
+    memcpy(p + 8, ascii, n + 1);
+    return 8 + n + 1;
+}
+
+/* 'desc', the description type a v2 profile uses in place of an 'mluc'.
+
+   The length in the header counts the terminator, so an eleven-character name
+   records twelve and occupies twelve bytes, and the ASCII half is not padded
+   out to the sixty-seven bytes its type nominally allows -- the Unicode half
+   starts immediately after.  Both remaining halves are present but empty: four
+   zero bytes of language code, four of count, and then the ScriptCode block,
+   which is a two-byte code, sixty-seven bytes of description and a count. */
+static size_t put_desc(unsigned char *p, const char *ascii)
+{
+    size_t n = strlen(ascii);
+
+    memcpy(p, "desc", 4);
+    put_be32(p + 4, 0);
+    put_be32(p + 8, (int32_t)(n + 1));
+    memcpy(p + 12, ascii, n + 1);
+    /* Language code, Unicode count, then the whole ScriptCode block: all of it
+       zero, so the tag ends up as one string and a run of padding. */
+    memset(p + 12 + n + 1, 0, 4 + 4 + 2 + 67 + 1);
+    return 12 + (n + 1) + 4 + 4 + 2 + 67 + 1;
+}
+
 /* One tone curve, of either kind.  Returns the length of the block. */
 static size_t put_icc_curve(unsigned char *p, const struct cgs_icc_curve *c)
 {
@@ -1161,23 +1210,29 @@ static void put_chad(unsigned char *p, const int32_t v[9])
         put_be32(p + 8 + 4 * i, v[i]);
 }
 
-/* The v4 header.  Every field is written out rather than copied from a
-   transcribed template, so the two that vary -- the size and the creation date
-   -- are patched last and the rest are visible at their offsets.  The profile
-   ID is left zero, which is not a placeholder: none of these eight profiles
-   carries a digest, so there is nothing for put_profile_id to compute.
+/* The ICC header, which the v4 RGB template and the v2.1 gray one share.
+
+   Every field is written out rather than copied from a transcribed template, so
+   the two that vary -- the size and the creation date -- are patched last and
+   the rest are visible at their offsets.  The profile ID is left zero, which
+   for eight of the eleven v4 profiles is not a placeholder: they carry no
+   digest, and the three that do have put_profile_id fill it in afterwards.
 
    The illuminant is three bare s15Fixed16 with no 'XYZ ' signature in front of
-   them, the one XYZ triple in a profile that is not a tag. */
-static void put_rgb_v4_header(unsigned char *p, size_t len, const int created[6])
+   them, the one XYZ triple in a profile that is not a tag.  Only the version
+   and the colour space signature separate the two templates: the gray profile
+   is v2.1 rather than v4 and describes a 'GRAY' space, though like the RGB
+   ones it has an XYZ PCS and every other field to match. */
+static void put_icc_header(unsigned char *p, size_t len, const int created[6],
+    int32_t version, const char *space)
 {
     int i;
 
     put_be32(p + CGICCProfileSizeOffset, (int32_t)len);
     memcpy(p + 4, "appl", 4);
-    put_be32(p + CGICCVersionOffset, 0x04000000);
+    put_be32(p + CGICCVersionOffset, version);
     memcpy(p + CGICCDeviceClassOffset, "mntr", 4);
-    memcpy(p + CGICCColorSpaceOffset, "RGB ", 4);
+    memcpy(p + CGICCColorSpaceOffset, space, 4);
     memcpy(p + CGICCColorSpaceOffset + 4, "XYZ ", 4);
     for (i = 0; i < 6; i++)
         put_be16(p + 24 + 2 * i, (unsigned)created[i]);
@@ -1188,6 +1243,11 @@ static void put_rgb_v4_header(unsigned char *p, size_t len, const int created[6]
     put_be32(p + 72, 0x00010000);
     put_be32(p + 76, 0x0000d32d);
     memcpy(p + 80, "appl", 4);
+}
+
+static void put_rgb_v4_header(unsigned char *p, size_t len, const int created[6])
+{
+    put_icc_header(p, len, created, 0x04000000, "RGB ");
 }
 
 /* Assemble the profile for one of the eight spaces.  Eight blocks are emitted
@@ -1503,6 +1563,170 @@ static CGColorSpaceRef CGColorSpaceCreateNamedRGBV4(CFStringRef name)
         s->profile = profile;
         s->profileLen = len;
         CGColorSpaceNamedRGBV4State[i] = s;
+        return s;
+    }
+    return NULL;
+}
+
+/* The v2.1 monochrome/TRC template.
+
+   Linear Gray is a gray profile rather than an RGB one and a v2.1 profile
+   rather than a v4, so it shares almost nothing with the eleven above but the
+   header: four tags rather than ten or eleven, the description and copyright as
+   the legacy 'desc' and 'text' types rather than 'mluc' records, no colorants
+   at all, and one tone curve rather than three.  What it shares is the white
+   point and the header illuminant, which agree exactly here -- the quantisation
+   step the RGB profiles mostly lose a unit to is not lost by this one.
+
+   The tag order is description, copyright, white point, tone curve, and it is
+   the same as the v4 template's for as far as the two run: 'desc', 'cprt',
+   'wtpt'.  The tone curve is the one-word identity every other tone curve here
+   is a special case of.
+
+   The four tags are laid out the same way, each block aligned and the next
+   beginning after it, so the data starts at 132 plus four entries and the two
+   strings run into each other's padding: the description ends at 282, the
+   copyright is written at 284 and ends at 319, and the white point follows at
+   320.  That leaves the tone curve's fourteen bytes finishing at 354, and the
+   profile is the 356 bytes that pads that to a four-byte boundary. */
+enum { CGICCGrayV2TagCount = 4 };
+
+/* One gray space's parameters.  As with the RGB rows above, these are
+   constants recovered from the profile the name resolves to rather than
+   anything worked out at run time. */
+struct cgs_gray_v2 {
+    const char *desc;
+    const char *cprt;
+    int created[6];
+    int32_t wtpt[3];
+    struct cgs_icc_curve trc;
+};
+
+/* Assemble the profile.  Four blocks go out -- the two strings, the white point
+   and the single tone curve -- and the four tags are pointed at them. */
+static unsigned char *put_gray_v2(const struct cgs_gray_v2 *v, size_t *outLen)
+{
+    enum { desc, cprt, wtpt, curve, blockCount };
+    static const char *const fixed[blockCount] = {
+        "desc", "cprt", "wtpt", "kTRC"
+    };
+    unsigned char *p;
+    size_t dlen, tlen, len;
+    int32_t tagOff[blockCount], tagLen[blockCount];
+    int i;
+
+    /* put_desc and put_text both size themselves from the string, so the two
+       lengths are worked out here rather than written down. */
+    dlen = 12 + (strlen(v->desc) + 1) + 4 + 4 + 2 + 67 + 1;
+    tlen = v->trc.parametric ? 12 + 4 * (size_t)v->trc.words : 14;
+
+    /* As in put_rgb_v4, the offsets are assigned in one pass and used again
+       below, so the two cannot disagree about where a block went. */
+    len = CGICCTagTableOffset + (size_t)CGICCGrayV2TagCount * CGICCTagEntrySize;
+    tagLen[desc] = (int32_t)dlen;
+    tagOff[desc] = (int32_t)icc_pad(len);
+    len = icc_pad(len) + dlen;
+    tagLen[cprt] = (int32_t)(8 + strlen(v->cprt) + 1);
+    tagOff[cprt] = (int32_t)icc_pad(len);
+    len = icc_pad(len) + tagLen[cprt];
+    tagLen[wtpt] = CGICCXYZLength;
+    tagOff[wtpt] = (int32_t)icc_pad(len);
+    len = icc_pad(len) + CGICCXYZLength;
+    tagLen[curve] = (int32_t)tlen;
+    tagOff[curve] = (int32_t)icc_pad(len);
+    len = icc_pad(len) + tlen;
+    /* The tone curve is fourteen bytes and leaves the profile two short of a
+       boundary, so the size counts the padding rather than the last tag. */
+    len = icc_pad(len);
+
+    p = calloc(1, len);
+    if (!p)
+        return NULL;
+
+    put_icc_header(p, len, v->created, 0x02100000, "GRAY");
+    put_be32(p + CGICCTagCountOffset, (uint32_t)CGICCGrayV2TagCount);
+    for (i = 0; i < CGICCGrayV2TagCount; i++) {
+        unsigned char *e = p + CGICCTagTableOffset + i * CGICCTagEntrySize;
+
+        memcpy(e, fixed[i], 4);
+        put_be32(e + 4, tagOff[i]);
+        put_be32(e + 8, tagLen[i]);
+    }
+
+    put_desc(p + tagOff[desc], v->desc);
+    put_text(p + tagOff[cprt], v->cprt);
+    put_xyz_i32(p + tagOff[wtpt], v->wtpt);
+    put_icc_curve(p + tagOff[curve], &v->trc);
+
+    *outLen = len;
+    return p;
+}
+
+/* The one profile, which the two names below share.  Recovered from the space
+   kCGColorSpaceLinearGray resolves to; put_gray_v2 was checked against it by
+   rebuilding the profile and comparing it byte for byte. */
+static const struct cgs_gray_v2 LinearGray = {
+    .desc = "Linear Gray",
+    .created = { 2016, 1, 1, 0, 0, 0 },
+    .cprt = "Copyright Apple Inc., 2016",
+    /* The D50 illuminant, quantised exactly -- unlike seven of the eight
+       non-linear RGB spaces, whose white point lands a unit below it. */
+    .wtpt = { 0xf6d6, 0x10000, 0xd32d },
+    .trc = { 0, 0, 256, 0, { 0x0 } },  /* u8Fixed8 gamma of 1.0 */
+};
+
+/* The two names, and the extended flag each carries.
+
+   kCGColorSpaceExtendedLinearGray takes the very same 356 bytes as the space
+   it is named after: the profile records no range, so the profile cannot be
+   what tells the two apart.  They are reported unequal and are the same space
+   once the range is ignored, which is the same arrangement the extended RGB
+   names use. */
+enum { CGColorSpaceNamedGrayV2Count = 2 };
+
+static const struct {
+    const char *name;
+    bool extended;
+} CGColorSpaceNamedGrayV2[CGColorSpaceNamedGrayV2Count] = {
+    { "kCGColorSpaceLinearGray", false },
+    { "kCGColorSpaceExtendedLinearGray", true }
+};
+
+static struct CGColorSpace *CGColorSpaceNamedGrayV2State[CGColorSpaceNamedGrayV2Count];
+
+/* Build, or find, the space one of the two gray names resolves to.  Answers
+   NULL for every other name, so the caller can fall through to the RGB
+   template the same way it falls through from there. */
+static CGColorSpaceRef CGColorSpaceCreateNamedGrayV2(CFStringRef name)
+{
+    struct CGColorSpace *s;
+    unsigned char *profile;
+    size_t len;
+    int i;
+
+    for (i = 0; i < CGColorSpaceNamedGrayV2Count; i++) {
+        if (!CGColorSpaceNameEqualsASCII(name, CGColorSpaceNamedGrayV2[i].name))
+            continue;
+        if (CGColorSpaceNamedGrayV2State[i])
+            return CGColorSpaceNamedGrayV2State[i];
+        profile = put_gray_v2(&LinearGray, &len);
+        if (!profile)
+            return NULL;
+        s = calloc(1, sizeof *s);
+        if (!s) {
+            free(profile);
+            return NULL;
+        }
+        s->immortal = true;
+        s->model = kCGColorSpaceModelMonochrome;
+        s->type = CGColorSpaceTypeICC;
+        s->ncomp = 1;
+        /* A literal like the device names', and not owned. */
+        s->name = CGColorSpaceNamedGrayV2[i].name;
+        s->extended = CGColorSpaceNamedGrayV2[i].extended;
+        s->profile = profile;
+        s->profileLen = len;
+        CGColorSpaceNamedGrayV2State[i] = s;
         return s;
     }
     return NULL;
@@ -2928,8 +3152,12 @@ CGColorSpaceRef CGColorSpaceCopyBaseColorSpace(CGColorSpaceRef space)
 
 /* Identity. */
 
-bool CGColorSpaceEqualToColorSpace(CGColorSpaceRef space1,
-    CGColorSpaceRef space2)
+/* The comparison behind both entry points, with ignoreRange selecting whether
+   the range is part of the answer.  The flag is threaded through the recursion
+   rather than consulted only at the top, because a pattern or indexed space
+   reaches its range through its base and would otherwise keep it. */
+static bool colorspace_equal(CGColorSpaceRef space1, CGColorSpaceRef space2,
+    bool ignoreRange)
 {
     struct CGColorSpace *a = space1;
     struct CGColorSpace *b = space2;
@@ -2942,7 +3170,7 @@ bool CGColorSpaceEqualToColorSpace(CGColorSpaceRef space1,
        patterns painted in the same space compare equal, and two colored
        patterns -- both of which have no base -- do too. */
     if (a->type == CGColorSpaceTypePattern && b->type == CGColorSpaceTypePattern)
-        return CGColorSpaceEqualToColorSpace(a->base, b->base);
+        return colorspace_equal(a->base, b->base, ignoreRange);
     /* A pattern space is never equal to a space that is not a pattern, and in
        particular is not equal to the space it wraps: Apple answers false for
        CGColorSpaceEqualToColorSpace(Pattern(rgb), rgb). */
@@ -2960,7 +3188,7 @@ bool CGColorSpaceEqualToColorSpace(CGColorSpaceRef space1,
             return false;
         if (a->indexedLen != b->indexedLen)
             return false;
-        if (!CGColorSpaceEqualToColorSpace(a->base, b->base))
+        if (!colorspace_equal(a->base, b->base, ignoreRange))
             return false;
         if (a->indexedLen
             && memcmp(a->indexed, b->indexed, a->indexedLen) != 0)
@@ -3002,17 +3230,32 @@ bool CGColorSpaceEqualToColorSpace(CGColorSpaceRef space1,
             return false;
         if (a->profileLen != b->profileLen)
             return false;
-        if (a->hasRange != b->hasRange)
-            return false;
-        if (a->hasRange && memcmp(a->range, b->range, sizeof a->range) != 0)
-            return false;
+        /* The output range is the first thing ignoreRange drops, then the
+           extended flag, which is the same thing said the other way round:
+           CGColorSpaceUsesExtendedRange is what reports it.  Neither is
+           derivable from the profile -- an extended space's bytes are its
+           base's byte for byte -- so both are compared here and both are
+           skipped there.
+
+           The linearized flag is kept even when the range is ignored.  It is
+           not a range: a linearized space reports no extended range, so
+           dropping it would merge answers that are about different spaces.  No
+           pair Apple exposes distinguishes more than this, since every alias
+           it has differs in the extended flag alone. */
+        if (!ignoreRange) {
+            if (a->hasRange != b->hasRange)
+                return false;
+            if (a->hasRange && memcmp(a->range, b->range, sizeof a->range) != 0)
+                return false;
+        }
         if (a->hasWhitePoint != b->hasWhitePoint)
             return false;
         if (a->hasWhitePoint
             && memcmp(a->whitePoint, b->whitePoint,
                 sizeof a->whitePoint) != 0)
             return false;
-        if (a->extended != b->extended || a->linearized != b->linearized)
+        if ((!ignoreRange && a->extended != b->extended)
+            || a->linearized != b->linearized)
             return false;
         for (k = 0; k < a->profileLen; k++) {
             if (k >= CGICCCreateDateOffset
@@ -3028,12 +3271,20 @@ bool CGColorSpaceEqualToColorSpace(CGColorSpaceRef space1,
     return a->model == b->model && a->ncomp == b->ncomp;
 }
 
+bool CGColorSpaceEqualToColorSpace(CGColorSpaceRef space1,
+    CGColorSpaceRef space2)
+{
+    return colorspace_equal(space1, space2, false);
+}
+
 bool CGColorSpaceEqualToColorSpaceIgnoringRange(CGColorSpaceRef space1,
     CGColorSpaceRef space2)
 {
-    /* No space in this step has an output range, so ignoring the range
-       cannot change the answer. */
-    return CGColorSpaceEqualToColorSpace(space1, space2);
+    /* Only the range and the extended flag are dropped.  Every space that has
+       an extended alias is reported unequal to it, and equal here: the three
+       extended RGB names and the extended gray one all take their base's
+       profile byte for byte. */
+    return colorspace_equal(space1, space2, true);
 }
 
 /* Capabilities. */
@@ -3080,10 +3331,16 @@ bool CGColorSpaceIsWideGamutRGB(CGColorSpaceRef space)
        very bytes the unextended one does, and calls that wide gamut while the
        other is not, so the profile alone cannot answer.  The type has to be
        tested before the flag path below, which is how the same profile handed
-       to a calibrated RGB caller comes out a different answer. */
+       to a calibrated RGB caller comes out a different answer.
+
+       That override is itself confined to RGB, because a gray profile has no
+       primaries to be wider than anything.  kCGColorSpaceExtendedLinearGray
+       reports an extended range and is nevertheless not wide gamut, so
+       letting the flag stand on its own would call it one. */
     if (s->type == CGColorSpaceTypeICC)
-        return s->extended || (s->model == kCGColorSpaceModelRGB && s->profile != NULL
-                               && icc_rgb_is_wide(s->profile, s->profileLen));
+        return s->model == kCGColorSpaceModelRGB
+               && (s->extended || (s->profile != NULL
+                                   && icc_rgb_is_wide(s->profile, s->profileLen)));
 
     /* A gamut wider than sRGB is not a property of the profile: a linearized
        RGB space answers true while answering false for an extended range,
