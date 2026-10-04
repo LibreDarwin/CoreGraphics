@@ -63,7 +63,15 @@ enum {
     CGColorSpaceTypeRGB = 1,
     CGColorSpaceTypeCMYK = 2,
     CGColorSpaceTypeLab = 5,
-    CGColorSpaceTypePattern = 9
+    CGColorSpaceTypePattern = 9,
+    /* What CGColorSpaceGetType reports for any space built from an ICC
+       profile, whatever the profile's colour model.  Verified by reading the
+       private CGColorSpaceGetType off a space built by
+       CGColorSpaceCreateWithICCData: gray, RGB, CMYK, XYZ, Lab and a generic
+       RGB all report 6, and so does every built-in named space except Lab,
+       which reports 5 because CGColorSpaceCreateLab builds it directly rather
+       than from a profile. */
+    CGColorSpaceTypeICC = 6
 };
 
 struct CGColorSpace {
@@ -310,6 +318,12 @@ enum {
     /* A tag count, then 12-byte entries of signature, offset and length. */
     CGICCTagCountOffset = 128,
     CGICCTagTableOffset = 132,
+    /* The rest of the header that CGColorSpaceCreateWithICCData reads. */
+    CGICCProfileSizeOffset = 0,
+    CGICCVersionOffset = 8,
+    CGICCDeviceClassOffset = 12,
+    CGICCSignatureOffset = 36,
+    CGICCTagEntrySize = 12,
     /* An XYZType is 'XYZ ', four reserved bytes, then three s15Fixed16. */
     CGICCXYZLength = 20,
     CGICCProfileIDOffset = 84,          /* 16 bytes */
@@ -1327,6 +1341,63 @@ static long icc_find_tag(const unsigned char *p, size_t len, const char *sig,
     return -1;
 }
 
+/* The value of an s15Fixed16 field.  The inverse of put_s15Fixed16. */
+static double icc_s15Fixed16(const unsigned char *p)
+{
+    return (double)(int32_t)get_be32(p) / 65536.0;
+}
+
+/* Whether an ICC profile describes a gamut wider than sRGB.
+
+   For a space built by CGColorSpaceCreateWithICCData this is a property of
+   the primaries rather than of a flag, and the measure is the area of the
+   triangle the three colorants subtend in CIE 1931 xy.  Nothing else in the
+   profile enters into it: changing the white point tag from D50 to D65 at a
+   fixed set of primaries does not move the answer, and neither does replacing
+   the tone curve with any gamma from 1.0 to 2.4.
+
+   It is the whole triangle that counts, not any one vertex.  Substituting P3's
+   red, green or blue into the sRGB primaries individually leaves the answer
+   false; substituting all three makes it true.  That rules out comparing each
+   colorant against sRGB's.
+
+   The boundary was bisected by interpolating the primaries between the sRGB
+   and Display P3 profiles: the last profile that reports false has an area of
+   0.134466838 and the first that reports true has 0.134470543, so the
+   threshold below sits inside a window of 4e-6. */
+static bool icc_rgb_is_wide(const unsigned char *p, size_t len)
+{
+    static const char *const prim[3] = { "rXYZ", "gXYZ", "bXYZ" };
+    double xy[3][2];
+    double area;
+    size_t i;
+
+    for (i = 0; i < 3; i++) {
+        size_t tagLen;
+        long at = icc_find_tag(p, len, prim[i], &tagLen);
+        double sum;
+
+        /* An XYZType is 'XYZ ', four reserved bytes, then three s15Fixed16 --
+           the components start at offset 8, not 4. */
+        if (at < 0 || tagLen < 20)
+            return false;
+        if (memcmp(p + at, "XYZ ", 4) != 0)
+            return false;
+
+        sum = icc_s15Fixed16(p + at + 8) + icc_s15Fixed16(p + at + 12)
+            + icc_s15Fixed16(p + at + 16);
+        if (!(sum > 0.0))
+            return false;
+        xy[i][0] = icc_s15Fixed16(p + at + 8) / sum;
+        xy[i][1] = icc_s15Fixed16(p + at + 12) / sum;
+    }
+
+    area = 0.5 * fabs(xy[0][0] * (xy[1][1] - xy[2][1])
+        + xy[1][0] * (xy[2][1] - xy[0][1])
+        + xy[2][0] * (xy[0][1] - xy[1][1]));
+    return area > 0.13446869;
+}
+
 /* The description tag is an mluc: 'mluc', four reserved bytes, a record
    count, a record size, then that many records of language, country, length
    and offset.  Apple writes exactly one enUS record and puts the text at
@@ -1635,6 +1706,299 @@ CGColorSpaceRef CGColorSpaceCreateExtended(CGColorSpaceRef baseSpace)
     return s;
 }
 
+/* An ICC profile's data colour space signature, read as the model and
+   component count Apple reports.  Only the five signatures real profiles use
+   are mapped, plus the DeviceN forms: 'nCLR', where the digit is the channel
+   count, and the handful of three-channel names CoreGraphics knows.
+
+   `required' receives the tags Apple insists on for the mapped model, and
+   `nclass' how many device classes it accepts.  Both vary by signature and
+   were measured by dropping tags one at a time and rewriting the class byte;
+   see the comment on the caller for the tables. */
+static int icc_model_for(const unsigned char *sig, CGColorSpaceModel *model,
+    size_t *ncomp, const char *const **required, int *nclass)
+{
+    static const char *const rgb[] = {
+        "rXYZ", "gXYZ", "bXYZ", "rTRC", "gTRC", "bTRC", NULL
+    };
+    static const char *const gray[] = { "kTRC", NULL };
+    static const char *const cmyk[] = { "A2B0", "B2A0", NULL };
+    static const char *const lab[] = { "A2B0", "B2A0", NULL };
+    static const char *const xyz[] = { "A2B0", "B2A0", NULL };
+    /* A DeviceN space is named for a colour space Apple does not model.  The
+       mandatory tags still come from the *body*'s own model, which the caller
+       derives from the tags themselves, so no list is attached here; the
+       caller resolves it after reading the tag table. */
+
+    if (memcmp(sig, "GRAY", 4) == 0) {
+        *model = kCGColorSpaceModelMonochrome; *ncomp = 1;
+        *required = gray; *nclass = 3; return 1;
+    }
+    if (memcmp(sig, "RGB ", 4) == 0) {
+        *model = kCGColorSpaceModelRGB; *ncomp = 3;
+        *required = rgb; *nclass = 2; return 1;
+    }
+    if (memcmp(sig, "CMYK", 4) == 0) {
+        *model = kCGColorSpaceModelCMYK; *ncomp = 4;
+        *required = cmyk; *nclass = 5; return 1;
+    }
+    if (memcmp(sig, "Lab ", 4) == 0) {
+        *model = kCGColorSpaceModelLab; *ncomp = 3;
+        *required = lab; *nclass = 5; return 1;
+    }
+    if (memcmp(sig, "XYZ ", 4) == 0) {
+        *model = kCGColorSpaceModelXYZ; *ncomp = 3;
+        *required = xyz; *nclass = 5; return 1;
+    }
+    /* 'HSV ', 'CMY ', 'Yxy ', 'Luv ' and 'HLS ' are all three channels, and
+       CoreGraphics maps each of them to DeviceN.  'YCbr' is not one of them
+       and is refused, like every other unrecognised name. */
+    if (memcmp(sig, "HSV ", 4) == 0 || memcmp(sig, "CMY ", 4) == 0
+        || memcmp(sig, "Yxy ", 4) == 0 || memcmp(sig, "Luv ", 4) == 0
+        || memcmp(sig, "HLS ", 4) == 0) {
+        *model = kCGColorSpaceModelDeviceN; *ncomp = 3;
+        *required = NULL; *nclass = 5; return 2;
+    }
+    /* 'nCLR' carries its channel count in the digit. */
+    if (sig[1] == 'C' && sig[2] == 'L' && sig[3] == 'R') {
+        unsigned d;
+
+        if (sig[0] >= '1' && sig[0] <= '9')
+            d = (unsigned)(sig[0] - '0');
+        else if (sig[0] >= 'A' && sig[0] <= 'F')
+            d = (unsigned)(sig[0] - 'A') + 10u;
+        else
+            return 0;
+        *model = kCGColorSpaceModelDeviceN; *ncomp = d;
+        *required = NULL; *nclass = 5; return 2;
+    }
+    return 0;
+}
+
+/* Is this tag in the table? */
+static int icc_has(const unsigned char *p, uint32_t count, const char *sig)
+{
+    uint32_t i;
+
+    for (i = 0; i < count; i++) {
+        const unsigned char *e = p + CGICCTagTableOffset + (size_t)i * CGICCTagEntrySize;
+
+        if (memcmp(e, sig, 4) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* A DeviceN profile's tags still form one of the models above, and that is
+   what its mandatory tags and channel count are.  The tag sets are disjoint
+   enough to tell gray and RGB apart outright: gray carries 'kTRC', RGB carries
+   the colorants and Tone tags.  CMYK, Lab and XYZ all carry the same
+   'A2B0'/'B2A0' pair and are not separable from the tags, but they differ in
+   channel count and only four of the three-channel models exists -- so the
+   one four-channel case is settled from the signature, which is still the
+   original 'CMYK' on a profile whose model is DeviceN. */
+static int icc_body_model(const unsigned char *p, uint32_t count,
+    CGColorSpaceModel *model, size_t *ncomp, const char *const **required,
+    int *nclass)
+{
+    static const char *const gray[] = { "kTRC", NULL };
+    static const char *const rgb[] = {
+        "rXYZ", "gXYZ", "bXYZ", "rTRC", "gTRC", "bTRC", NULL
+    };
+    static const char *const cmyk[] = { "A2B0", "B2A0", NULL };
+    static const char *const xyz[] = { "A2B0", "B2A0", NULL };
+
+    if (icc_has(p, count, "kTRC") && !icc_has(p, count, "rXYZ")
+        && !icc_has(p, count, "A2B0")) {
+        *model = kCGColorSpaceModelMonochrome; *ncomp = 1;
+        *required = gray; *nclass = 3; return 1;
+    }
+    if (icc_has(p, count, "rXYZ") || icc_has(p, count, "gXYZ")
+        || icc_has(p, count, "bXYZ")) {
+        *model = kCGColorSpaceModelRGB; *ncomp = 3;
+        *required = rgb; *nclass = 2; return 1;
+    }
+    if (icc_has(p, count, "A2B0") && icc_has(p, count, "B2A0")) {
+        /* Four channels, or three: 'CMYK' is the only four-channel body. */
+        if (memcmp(p + CGICCColorSpaceOffset, "CMYK", 4) == 0) {
+            *model = kCGColorSpaceModelCMYK; *ncomp = 4;
+            *required = cmyk;
+        } else {
+            *model = kCGColorSpaceModelXYZ; *ncomp = 3;
+            *required = xyz;
+        }
+        *nclass = 5; return 1;
+    }
+    return 0;
+}
+
+/* The device classes Apple accepts for a given colour space signature.  This
+   is not a flat allowlist of the five real ICC classes: an RGB profile takes
+   only 'mntr' and 'scnr', a gray one also takes 'prtr', and CMYK, Lab and XYZ
+   take all five.  Measured by rewriting the class byte of a working profile
+   and reading the result back; the sets are what CoreGraphics does, not what
+   the ICC specification suggests. */
+static int icc_class_ok(const unsigned char *cls, int nclass)
+{
+    static const char *const all[] = { "mntr", "scnr", "prtr", "spac", "abst" };
+    int i;
+
+    for (i = 0; i < nclass; i++)
+        if (memcmp(cls, all[i], 4) == 0)
+            return 1;
+    return 0;
+}
+
+/* CGColorSpaceCreateWithICCData.  Accepts an ICC profile the caller already
+   has and answers the model and component count its header declares, keeping
+   the profile bytes verbatim so CGColorSpaceCopyICCData hands them back
+   unchanged.
+
+   What Apple validates, established by mutating one field at a time and
+   reading the result back: the 'acsp' signature, a nonzero profile version, a
+   device class the colour space accepts (see icc_class_ok), and a tag table
+   that fits with every tag's offset+length inside the data.  Apple also
+   insists on the tags the mapped model cannot be described without -- six
+   colorant/Tone tags for RGB, 'kTRC' for gray, 'A2B0' and 'B2A0' for CMYK, Lab
+   and XYZ -- so lowering the tag count until one of those falls off the end is
+   refused, while dropping 'desc', 'cprt', 'wtpt' or 'bkpt' is not.  The
+   profile-size field is not one of the things it checks: a profile claiming 0
+   or 0xFFFFFFFF bytes is still accepted, and so is one claiming a size smaller
+   than its own tag table.
+
+   The length actually kept is min(data length, max(needed, declared)), where
+   needed is the end of the tag table or the furthest tag, whichever is
+   later.  Data beyond that is dropped, which is why a buffer with 64 trailing
+   zero bytes comes back 64 bytes shorter than it went in. */
+CGColorSpaceRef CGColorSpaceCreateWithICCData(CFDataRef data)
+{
+    const unsigned char *p;
+    size_t len, need, stored;
+    uint32_t count, i;
+    uint64_t far;
+    CGColorSpaceModel model;
+    size_t ncomp;
+    const char *const *required;
+    int nclass, ri;
+    struct CGColorSpace *s;
+    unsigned char *copy;
+
+    if (!data)
+        return NULL;
+    p = CFDataGetBytePtr(data);
+    len = (size_t)CFDataGetLength(data);
+    /* Enough for a header and one tag table entry. */
+    if (len < CGICCTagTableOffset + CGICCTagEntrySize)
+        return NULL;
+    if (memcmp(p + CGICCSignatureOffset, "acsp", 4) != 0)
+        return NULL;
+    if (get_be32(p + CGICCVersionOffset) == 0)
+        return NULL;
+
+    /* The end of the tag table, and the furthest byte any tag reaches.  Both
+       are computed in 64 bits so an out-of-range offset or length cannot wrap
+       a 32-bit sum and slip through.
+
+       The declared count is not trusted to fit: a profile claiming 0xFFFFFFFF
+       tags is refused, but the entries are read only while the table still
+       lies inside the data, and a table that overruns simply leaves `far' past
+       the end. */
+    count = get_be32(p + CGICCTagCountOffset);
+    far = (uint64_t)CGICCTagTableOffset + (uint64_t)count * CGICCTagEntrySize;
+    if (far > (uint64_t)len)
+        return NULL;
+    for (i = 0; i < count; i++) {
+        const unsigned char *e = p + CGICCTagTableOffset + (size_t)i * CGICCTagEntrySize;
+        uint64_t end = (uint64_t)get_be32(e + 4) + get_be32(e + 8);
+
+        if (end > far)
+            far = end;
+    }
+    /* A tag pointing past the end of the data fails here, because needed
+       then exceeds what the caller supplied. */
+    if (far > len)
+        return NULL;
+    need = (size_t)far;
+    if (need < CGICCTagTableOffset + CGICCTagEntrySize)
+        return NULL;
+    /* Does the tag table carry this tag? */
+    {
+        int rc = icc_model_for(p + CGICCColorSpaceOffset, &model, &ncomp,
+            &required, &nclass);
+
+        if (rc == 0)
+            return NULL;
+        if (rc == 2) {
+            /* A DeviceN signature does not say what the profile describes, so
+               the tags decide: the mandatory set belongs to whichever body
+               model they form, and the channel count in the signature has to
+               agree with that body or the profile is refused.  This is what
+               makes '3CLR' work on an RGB, Lab or XYZ body and fail on a gray
+               or CMYK one.  The model stays DeviceN; only the requirements
+               and the channel count come from the body. */
+            CGColorSpaceModel bm;
+            size_t bn;
+            const char *const *breq;
+            int bcl;
+
+            if (!icc_body_model(p, count, &bm, &bn, &breq, &bcl))
+                return NULL;
+            if (bn != ncomp)
+                return NULL;
+            required = breq;
+        }
+    }
+    if (!icc_class_ok(p + CGICCDeviceClassOffset, nclass))
+        return NULL;
+    /* The tags the mapped model cannot be described without have to be in the
+       table.  This is what makes a lowered tag count fail: the entries are
+       dropped from the tail, so whichever mandatory tag sat last is the one
+       that disappears. */
+    for (ri = 0; required && required[ri]; ri++) {
+        int found = 0;
+
+        for (i = 0; i < count && !found; i++) {
+            const unsigned char *e = p + CGICCTagTableOffset
+                + (size_t)i * CGICCTagEntrySize;
+
+            if (memcmp(e, required[ri], 4) == 0)
+                found = 1;
+        }
+        if (!found)
+            return NULL;
+    }
+
+    {
+        uint64_t declared = get_be32(p + CGICCProfileSizeOffset);
+        uint64_t cap = declared > (uint64_t)need ? declared : (uint64_t)need;
+
+        stored = len < (size_t)cap ? len : (size_t)cap;
+    }
+
+    s = calloc(1, sizeof *s);
+    if (!s)
+        return NULL;
+    copy = malloc(stored);
+    if (!copy) {
+        free(s);
+        return NULL;
+    }
+    memcpy(copy, p, stored);
+    s->immortal = false;
+    s->refcount = 1;
+    s->model = model;
+    s->type = CGColorSpaceTypeICC;
+    s->ncomp = ncomp;
+    /* A profile handed to us carries no built-in name: Apple recovers one by
+       matching the bytes against its profile table, which this step does not
+       have, so the name stays absent until that table exists. */
+    s->name = NULL;
+    s->base = NULL;
+    s->profile = copy;
+    s->profileLen = stored;
+    return s;
+}
+
 /* Reference counting. */
 
 
@@ -1898,6 +2262,18 @@ bool CGColorSpaceIsWideGamutRGB(CGColorSpaceRef space)
 {
     struct CGColorSpace *s = space;
 
+    if (s == NULL)
+        return false;
+
+    /* A space built from a profile answers from its colorants, not from a
+       flag, and only an RGB one has the primaries the measure needs.  The
+       same profile handed to CGColorSpaceCreateCalibratedRGB's caller instead
+       reaches the flag path below, which is why the type has to be tested
+       before the flags. */
+    if (s->type == CGColorSpaceTypeICC)
+        return s->model == kCGColorSpaceModelRGB && s->profile != NULL
+            && icc_rgb_is_wide(s->profile, s->profileLen);
+
     /* A gamut wider than sRGB is not a property of the profile: a linearized
        RGB space answers true while answering false for an extended range,
        and both an extended gray and a linearized gray answer false.  So it
@@ -1909,7 +2285,7 @@ bool CGColorSpaceIsWideGamutRGB(CGColorSpaceRef space)
        point's block is degenerate -- a zero white point makes every colorant
        zero as well -- and Apple does not call those wide gamut.  The collapse
        is legible in the tag table, so it can be asked rather than recorded. */
-    if (s == NULL || s->ncomp != 3 || (!s->extended && !s->linearized))
+    if (s->ncomp != 3 || (!s->extended && !s->linearized))
         return false;
     if (s->linearized && !s->extended && s->profile) {
         size_t len;
@@ -1974,8 +2350,9 @@ int CGColorSpaceGetRenderingIntent(CGColorSpaceRef space)
     return 0;
 }
 
-/* ICC profile.  None of the spaces in this step has one, so these all
-   report "no profile" rather than manufacturing an empty one. */
+/* ICC profile.  A space built by CGColorSpaceCreateWithICCData carries the
+   bytes it was given; the device, pattern and calibrated spaces have none, so
+   those still report "no profile" rather than manufacturing an empty one. */
 
 CFDataRef CGColorSpaceCopyICCData(CGColorSpaceRef space)
 {

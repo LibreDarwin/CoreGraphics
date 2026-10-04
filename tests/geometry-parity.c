@@ -1917,6 +1917,444 @@ int main(void)
             }
         }
 
+        /* CGColorSpaceCreateWithICCData.
+
+           The inputs are profiles this step already produces byte for byte --
+           the calibrated gray and RGB spaces -- so a difference here is about
+           the parsing and not about the profile bytes underneath.  Each is
+           round-tripped and the model, component count and profile handed back
+           compared; a profile Apple accepts has to come back unchanged.
+
+           Then the validation rules, each pinned by mutating a single field
+           of a good RGB profile and reading the accept/reject answer back. */
+        {
+            static const CGFloat icc_d50[3] = { 0.9505, 1.0, 1.0890 };
+            static const CGFloat icc_g222[3] = { 2.2, 2.2, 2.2 };
+            static const CGFloat icc_idm[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+            CGColorSpaceRef srcspace[2];
+            static const char *const nlab[] = { "gray", "rgb" };
+            /* The signed tag this fixture keys each mutation off, and the
+               value it is replaced with. */
+            static const struct {
+                const char *what;
+                size_t off;
+                const char *val;
+            } muts[] = {
+                /* Not the signature Apple wants. */
+                { "acsp_upper", 36, "ACSP" },
+                { "acsp_zero", 36, "\0\0\0\0" },
+                /* Only mntr and scnr are display and input profiles; the
+                   rest of the ICC device classes are refused. */
+                { "class_prtr", 12, "prtr" },
+                { "class_spac", 12, "spac" },
+                { "class_abst", 12, "abst" },
+                { "class_zero", 12, "\0\0\0\0" },
+                { "class_upper", 12, "MNTR" },
+                /* A colour space signature with no model. */
+                { "cs_hsv", 16, "HSV " },
+                { "cs_2clr", 16, "2CLR" },
+                { "cs_zero", 16, "\0\0\0\0" },
+            };
+            const size_t nn = sizeof srcspace / sizeof srcspace[0];
+            const size_t nm = sizeof muts / sizeof muts[0];
+            size_t i2, m;
+            unsigned char *buf;
+            size_t blen;
+
+            srcspace[0] = CGColorSpaceCreateCalibratedGray(icc_d50, NULL, 2.2);
+            srcspace[1] = CGColorSpaceCreateCalibratedRGB(icc_d50, NULL,
+                icc_g222, icc_idm);
+
+            /* Round-trip a gray and an RGB profile. */
+            for (i2 = 0; i2 < nn; i2++) {
+                CFDataRef src = srcspace[i2]
+                    ? CGColorSpaceCopyICCData(srcspace[i2]) : NULL;
+                CGColorSpaceRef s = src ? CGColorSpaceCreateWithICCData(src) : NULL;
+                CFDataRef back = s ? CGColorSpaceCopyICCData(s) : NULL;
+
+                snprintf(l, sizeof l, "icc/%s/non_null", nlab[i2]);
+                b(l, s != NULL);
+                snprintf(l, sizeof l, "icc/%s/model", nlab[i2]);
+                n(l, s ? (long long)CGColorSpaceGetModel(s) : -1);
+                snprintf(l, sizeof l, "icc/%s/ncomp", nlab[i2]);
+                n(l, s ? (long long)CGColorSpaceGetNumberOfComponents(s) : -1);
+                snprintf(l, sizeof l, "icc/%s/name_is_null", nlab[i2]);
+                b(l, s && CGColorSpaceCopyName(s) == NULL);
+                snprintf(l, sizeof l, "icc/%s/base_is_null", nlab[i2]);
+                b(l, s && CGColorSpaceGetBaseColorSpace(s) == NULL);
+                snprintf(l, sizeof l, "icc/%s/ext_range", nlab[i2]);
+                b(l, s && CGColorSpaceUsesExtendedRange(s));
+                snprintf(l, sizeof l, "icc/%s/wide", nlab[i2]);
+                b(l, s && CGColorSpaceIsWideGamutRGB(s));
+                snprintf(l, sizeof l, "icc/%s/ps2", nlab[i2]);
+                b(l, s && CGColorSpaceIsPSLevel2Compatible(s));
+                snprintf(l, sizeof l, "icc/%s/is_icc", nlab[i2]);
+                b(l, s && CGColorSpaceIsICCCompatible(s));
+                /* The whole profile, unmasked: these are fixed templates, so
+                   there is no creation date to hide. */
+                snprintf(l, sizeof l, "icc/%s/profile", nlab[i2]);
+                icc(l, back);
+                /* And it is the input, not merely an equal profile. */
+                snprintf(l, sizeof l, "icc/%s/roundtrip", nlab[i2]);
+                b(l, back && src &&
+                    CFDataGetLength(back) == CFDataGetLength(src) &&
+                    memcmp(CFDataGetBytePtr(back), CFDataGetBytePtr(src),
+                        (size_t)CFDataGetLength(src)) == 0);
+                if (back) CFRelease(back);
+                if (s) CGColorSpaceRelease(s);
+                if (src) CFRelease(src);
+            }
+
+            /* What is refused outright. */
+            b("icc/reject/null", CGColorSpaceCreateWithICCData(NULL) == NULL);
+            {
+                unsigned char junk[64];
+                CFDataRef d;
+
+                memset(junk, 0xAB, sizeof junk);
+                d = CFDataCreate(kCFAllocatorDefault, junk, (CFIndex)sizeof junk);
+                b("icc/reject/garbage",
+                    CGColorSpaceCreateWithICCData(d) == NULL);
+                if (d) CFRelease(d);
+                d = CFDataCreate(kCFAllocatorDefault, junk, 8);
+                b("icc/reject/short", CGColorSpaceCreateWithICCData(d) == NULL);
+                if (d) CFRelease(d);
+                d = CFDataCreate(kCFAllocatorDefault, junk, 0);
+                b("icc/reject/empty", CGColorSpaceCreateWithICCData(d) == NULL);
+                if (d) CFRelease(d);
+            }
+
+            /* Take an RGB profile as the base for the field mutations. */
+            {
+                CFDataRef src = CGColorSpaceCopyICCData(srcspace[1]);
+
+                blen = (size_t)CFDataGetLength(src);
+                buf = malloc(blen + 64);
+                memcpy(buf, CFDataGetBytePtr(src), blen);
+
+                /* Truncation at every interesting boundary.  Cutting one byte
+                   short drops the last tag's final byte, which Apple rejects;
+                   so does anything shorter. */
+                {
+                    size_t cuts[] = {
+                        128, 132, 143, 144, blen - 1,
+                    };
+                    size_t c;
+
+                    for (c = 0; c < sizeof cuts / sizeof cuts[0]; c++) {
+                        CFDataRef d = CFDataCreate(kCFAllocatorDefault, buf,
+                            (CFIndex)cuts[c]);
+                        snprintf(l, sizeof l, "icc/trunc/%zu", cuts[c]);
+                        b(l, CGColorSpaceCreateWithICCData(d) == NULL);
+                        if (d) CFRelease(d);
+                    }
+                    /* The full profile is accepted, which is what makes the
+                       truncation results above meaningful. */
+                    {
+                        CFDataRef d = CFDataCreate(kCFAllocatorDefault, buf,
+                            (CFIndex)blen);
+                        snprintf(l, sizeof l, "icc/trunc/full");
+                        b(l, CGColorSpaceCreateWithICCData(d) != NULL);
+                        if (d) CFRelease(d);
+                    }
+                }
+
+                /* Trailing bytes past the end of the profile are dropped, so
+                   the answer is still a space and its profile is the original
+                   length rather than what went in. */
+                {
+                    static const size_t extra[] = { 1, 8, 64 };
+                    size_t e;
+
+                    memset(buf + blen, 0, 64);
+                    for (e = 0; e < sizeof extra / sizeof extra[0]; e++) {
+                        CFDataRef d = CFDataCreate(kCFAllocatorDefault, buf,
+                            (CFIndex)(blen + extra[e]));
+                        CGColorSpaceRef s =
+                            CGColorSpaceCreateWithICCData(d);
+                        CFDataRef back = s ? CGColorSpaceCopyICCData(s) : NULL;
+
+                        snprintf(l, sizeof l, "icc/extra/%zu/non_null", extra[e]);
+                        b(l, s != NULL);
+                        snprintf(l, sizeof l, "icc/extra/%zu/len", extra[e]);
+                        n(l, back ? (long long)CFDataGetLength(back) : -1);
+                        snprintf(l, sizeof l, "icc/extra/%zu/roundtrip", extra[e]);
+                        b(l, back &&
+                            CFDataGetLength(back) == (CFIndex)blen &&
+                            memcmp(CFDataGetBytePtr(back), buf, blen) == 0);
+                        if (back) CFRelease(back);
+                        if (s) CGColorSpaceRelease(s);
+                        if (d) CFRelease(d);
+                    }
+                }
+
+                /* The declared profile size is not what decides anything: a
+                   lie in either direction, including zero and the maximum, is
+                   still accepted and still yields the original bytes. */
+                {
+                    static const unsigned sizes[] = {
+                        0u, 128u, 0xFFFFFFFFu,
+                    };
+                    size_t e;
+
+                    for (e = 0; e < sizeof sizes / sizeof sizes[0]; e++) {
+                        CFDataRef d;
+                        CGColorSpaceRef s;
+                        CFDataRef back;
+                        unsigned char hdr[4];
+
+                        hdr[0] = (unsigned char)(sizes[e] >> 24);
+                        hdr[1] = (unsigned char)(sizes[e] >> 16);
+                        hdr[2] = (unsigned char)(sizes[e] >> 8);
+                        hdr[3] = (unsigned char)sizes[e];
+                        memcpy(buf, hdr, 4);
+                        d = CFDataCreate(kCFAllocatorDefault, buf,
+                            (CFIndex)blen);
+                        s = CGColorSpaceCreateWithICCData(d);
+                        back = s ? CGColorSpaceCopyICCData(s) : NULL;
+                        snprintf(l, sizeof l, "icc/declared/%zu/non_null", e);
+                        b(l, s != NULL);
+                        snprintf(l, sizeof l, "icc/declared/%zu/roundtrip", e);
+                        b(l, back &&
+                            CFDataGetLength(back) == (CFIndex)blen &&
+                            memcmp(CFDataGetBytePtr(back), buf, blen) == 0);
+                        if (back) CFRelease(back);
+                        if (s) CGColorSpaceRelease(s);
+                        if (d) CFRelease(d);
+                    }
+                    memcpy(buf, CFDataGetBytePtr(src), blen);
+                }
+
+                /* Version zero is refused; 2.1 and 4.0 are not. */
+                {
+                        static const unsigned vers[] = {
+                            0u, 0x02100000u, 0x04000000u,
+                        };
+                        size_t e;
+
+                        for (e = 0; e < sizeof vers / sizeof vers[0]; e++) {
+                            unsigned char hdr[4];
+                            CFDataRef d;
+
+                            hdr[0] = (unsigned char)(vers[e] >> 24);
+                            hdr[1] = (unsigned char)(vers[e] >> 16);
+                            hdr[2] = (unsigned char)(vers[e] >> 8);
+                            hdr[3] = (unsigned char)vers[e];
+                            memcpy(buf + 8, hdr, 4);
+                            d = CFDataCreate(kCFAllocatorDefault, buf,
+                                (CFIndex)blen);
+                            snprintf(l, sizeof l, "icc/version/%zu", e);
+                            b(l, (CGColorSpaceCreateWithICCData(d) != NULL)
+                                == (vers[e] != 0));
+                            if (d) CFRelease(d);
+                        }
+                        memcpy(buf, CFDataGetBytePtr(src), blen);
+                    }
+
+                /* The remaining single-field mutations: signature, device
+                   class and colour space. */
+                for (m = 0; m < nm; m++) {
+                    CFDataRef d;
+
+                    memcpy(buf, CFDataGetBytePtr(src), blen);
+                    memcpy(buf + muts[m].off, muts[m].val, 4);
+                    d = CFDataCreate(kCFAllocatorDefault, buf, (CFIndex)blen);
+                    snprintf(l, sizeof l, "icc/mut/%s", muts[m].what);
+                    b(l, CGColorSpaceCreateWithICCData(d) == NULL);
+                    if (d) CFRelease(d);
+                }
+                memcpy(buf, CFDataGetBytePtr(src), blen);
+
+                /* Tag count and tag bounds.  A count that puts the table past
+                   the end of the data, a tag whose offset and length run past
+                   it, and a count of zero are all refused. */
+                {
+                    static const unsigned counts[] = {
+                        0u, 1u, 9u, 10000u, 0xFFFFFFFFu,
+                    };
+                    size_t e;
+
+                    for (e = 0; e < sizeof counts / sizeof counts[0]; e++) {
+                        unsigned char v[4];
+                        CFDataRef d;
+
+                        v[0] = (unsigned char)(counts[e] >> 24);
+                        v[1] = (unsigned char)(counts[e] >> 16);
+                        v[2] = (unsigned char)(counts[e] >> 8);
+                        v[3] = (unsigned char)counts[e];
+                        memcpy(buf + 128, v, 4);
+                        d = CFDataCreate(kCFAllocatorDefault, buf,
+                            (CFIndex)blen);
+                        snprintf(l, sizeof l, "icc/tagcount/%u", counts[e]);
+                        b(l, CGColorSpaceCreateWithICCData(d) == NULL);
+                        if (d) CFRelease(d);
+                    }
+                    memcpy(buf, CFDataGetBytePtr(src), blen);
+
+                    /* The first tag entry points past the end, three ways. */
+                    {
+                        static const unsigned bad[] = {
+                            0xFFFFFF00u, 0xFFFFFFFFu,
+                        };
+                        size_t e2;
+
+                        for (e2 = 0; e2 < sizeof bad / sizeof bad[0]; e2++) {
+                            unsigned char v[4];
+                            CFDataRef d;
+
+                            /* Offset. */
+                            v[0] = (unsigned char)(bad[e2] >> 24);
+                            v[1] = (unsigned char)(bad[e2] >> 16);
+                            v[2] = (unsigned char)(bad[e2] >> 8);
+                            v[3] = (unsigned char)bad[e2];
+                            memcpy(buf + 136, v, 4);
+                            d = CFDataCreate(kCFAllocatorDefault, buf,
+                                (CFIndex)blen);
+                            snprintf(l, sizeof l,
+                                "icc/tag/off/%zu", e2);
+                            b(l, CGColorSpaceCreateWithICCData(d) == NULL);
+                            if (d) CFRelease(d);
+                            /* Length. */
+                            memcpy(buf, CFDataGetBytePtr(src), blen);
+                            memcpy(buf + 140, v, 4);
+                            d = CFDataCreate(kCFAllocatorDefault, buf,
+                                (CFIndex)blen);
+                            snprintf(l, sizeof l,
+                                "icc/tag/len/%zu", e2);
+                            b(l, CGColorSpaceCreateWithICCData(d) == NULL);
+                            if (d) CFRelease(d);
+                            memcpy(buf, CFDataGetBytePtr(src), blen);
+                        }
+                        /* An offset just short of the end, so offset+length
+                           overshoots by the length. */
+                        {
+                            unsigned char v[4];
+                            CFDataRef d;
+
+                            v[0] = (unsigned char)((blen - 4) >> 24);
+                            v[1] = (unsigned char)((blen - 4) >> 16);
+                            v[2] = (unsigned char)((blen - 4) >> 8);
+                            v[3] = (unsigned char)(blen - 4);
+                            memcpy(buf + 136, v, 4);
+                            d = CFDataCreate(kCFAllocatorDefault, buf,
+                                (CFIndex)blen);
+                            b("icc/tag/off/end",
+                                CGColorSpaceCreateWithICCData(d) == NULL);
+                            if (d) CFRelease(d);
+                            memcpy(buf, CFDataGetBytePtr(src), blen);
+                        }
+                    }
+                }
+
+                free(buf);
+                if (src) CFRelease(src);
+            }
+
+            /* Wide gamut for a profile-backed space is decided from the
+               colorants, so it is swept over real spaces rather than one
+               fixture.  Each matrix is the primaries of a space Apple ships,
+               read out of its own profile and laid out for
+               CreateCalibratedRGB: rows are X, Y and Z of red, green and blue.
+               The profile that comes back is then fed to CreateWithICCData,
+               because a calibrated space answers from a flag and says false
+               for all of these. */
+            {
+                static const struct {
+                    const char *name;
+                    CGFloat m[9];
+                } gamuts[] = {
+                    { "srgb", { 0.43607, 0.38515, 0.14307,
+                                0.22249, 0.71687, 0.06061,
+                                0.01392, 0.09708, 0.71410 } },
+                    { "genericrgb", { 0.45430, 0.35335, 0.15665,
+                                      0.24191, 0.67363, 0.08446,
+                                      0.01489, 0.09064, 0.71957 } },
+                    { "genericrgblin", { 0.45430, 0.35330, 0.15660,
+                                        0.24260, 0.67439, 0.08340,
+                                        0.01480, 0.09039, 0.71950 } },
+                    { "adobergb", { 0.60974, 0.20528, 0.14919,
+                                    0.31111, 0.62567, 0.06322,
+                                    0.01947, 0.06087, 0.74457 } },
+                    { "dcip3", { 0.48616, 0.32385, 0.15419,
+                                 0.22668, 0.71033, 0.06299,
+                                 -0.00081, 0.04323, 0.78247 } },
+                    { "displayp3", { 0.51512, 0.29198, 0.15710,
+                                     0.24120, 0.69225, 0.06657,
+                                     -0.00105, 0.04189, 0.78407 } },
+                    { "rec2020", { 0.67348, 0.16566, 0.12505,
+                                   0.27904, 0.67534, 0.04561,
+                                   -0.00194, 0.02998, 0.79684 } },
+                    { "acescg", { 0.68988, 0.14977, 0.12456,
+                                  0.28452, 0.67169, 0.04379,
+                                  -0.00604, 0.01001, 0.82094 } },
+                    /* The extremes: the identity matrix is the widest
+                       triangle a profile can describe. */
+                    { "identity", { 1, 0, 0, 0, 1, 0, 0, 0, 1 } },
+                    /* All three primaries pulled in towards the white point,
+                       which shrinks the triangle without changing its shape
+                       much. */
+                    { "collapsed", { 0.05, 0.03, 0.02,
+                                     0.03, 0.05, 0.02,
+                                     0.02, 0.02, 0.05 } },
+                };
+                size_t gi;
+
+                for (gi = 0; gi < sizeof gamuts / sizeof gamuts[0]; gi++) {
+                    CGColorSpaceRef c = CGColorSpaceCreateCalibratedRGB(
+                        icc_d50, NULL, icc_g222, gamuts[gi].m);
+                    CFDataRef d = c ? CGColorSpaceCopyICCData(c) : NULL;
+                    CGColorSpaceRef s = d
+                        ? CGColorSpaceCreateWithICCData(d) : NULL;
+
+                    snprintf(l, sizeof l, "icc/wide/%s", gamuts[gi].name);
+                    b(l, s && CGColorSpaceIsWideGamutRGB(s));
+                    if (s) CGColorSpaceRelease(s);
+                    if (d) CFRelease(d);
+                    if (c) CGColorSpaceRelease(c);
+                }
+
+                /* The boundary itself.  Interpolating every primary from sRGB
+                   toward Display P3 crosses from false to true, and doing it
+                   on one primary at a time does not -- the whole triangle has
+                   to be bigger, not just a vertex. */
+                for (gi = 0; gi <= 10; gi++) {
+                    static const CGFloat srgb[9] = {
+                        0.43607, 0.38515, 0.14307,
+                        0.22249, 0.71687, 0.06061,
+                        0.01392, 0.09708, 0.71410
+                    };
+                    static const CGFloat p3[9] = {
+                        0.51512, 0.29198, 0.15710,
+                        0.24120, 0.69225, 0.06657,
+                        -0.00105, 0.04189, 0.78407
+                    };
+                    CGFloat t = (CGFloat)gi / 10.0f;
+                    CGFloat m[9];
+                    int k;
+
+                    for (k = 0; k < 9; k++)
+                        m[k] = (CGFloat)(float)(srgb[k]
+                            + t * (p3[k] - srgb[k]));
+                    {
+                        CGColorSpaceRef c = CGColorSpaceCreateCalibratedRGB(
+                            icc_d50, NULL, icc_g222, m);
+                        CFDataRef d = c ? CGColorSpaceCopyICCData(c) : NULL;
+                        CGColorSpaceRef s = d
+                            ? CGColorSpaceCreateWithICCData(d) : NULL;
+
+                        snprintf(l, sizeof l, "icc/wideblend/%zu", gi);
+                        b(l, s && CGColorSpaceIsWideGamutRGB(s));
+                        if (s) CGColorSpaceRelease(s);
+                        if (d) CFRelease(d);
+                        if (c) CGColorSpaceRelease(c);
+                    }
+                }
+            }
+
+            for (i2 = 0; i2 < nn; i2++)
+                if (srcspace[i2]) CGColorSpaceRelease(srcspace[i2]);
+        }
+
         /* Pairwise equality, including pattern spaces with equal, different
            and absent bases. */
         for (size_t i = 0; i < nspaces; i++) {

@@ -282,6 +282,20 @@ CG_EXTERN CFDataRef __nullable CGColorSpaceCopyICCProfile(
     CGColorSpaceRef cg_nullable space)
     __CG_DEPRECATED_WITH_MSG("Use CGColorSpaceCopyICCData");
 
+/* Build a color space from ICC profile data the caller already holds.  The
+   model and component count come from the profile's data colour space
+   signature, and the bytes are kept verbatim, so CGColorSpaceCopyICCData
+   returns the profile unchanged (short of trailing bytes past the end of the
+   tag table and its furthest tag, which are dropped).
+
+   Returns NULL when `data' is NULL, is too short to hold a header and a tag
+   table, lacks the 'acsp' signature, declares version zero, carries a device
+   class the profile's colour space does not accept, is missing a tag the
+   colour space cannot be described without, has a tag pointing past the end of
+   the data, or names a colour space Apple does not hand back a model for. */
+CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateWithICCData(
+    CFDataRef cg_nullable data);
+
 /* Return the number of entries in the color table of `space'.  This is zero
    unless `space' is an indexed color space. */
 CG_EXTERN size_t CGColorSpaceGetColorTableCount(CGColorSpaceRef cg_nullable space)
