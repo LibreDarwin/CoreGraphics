@@ -448,14 +448,14 @@ CGColorSpaceRef CGColorSpaceCreateWithName(CFStringRef name)
         return s;
     }
 
-    /* Ten of the remaining names resolve to the eight profiles that share the
-       ten-tag v4 template, and CGColorSpaceCreateNamedRGBV4 answers for exactly
-       those ten -- including the two extended-range aliases, which take the
-       same profile bytes as their base and differ only in the name they
+    /* Sixteen of the remaining names resolve to the eleven profiles that share
+       the v4 template, and CGColorSpaceCreateNamedRGBV4 answers for exactly
+       those sixteen -- including the three extended-range aliases, which take
+       the same profile bytes as their base and differ only in the name they
        report and the extended flag they carry.
 
-       The names it does not own fall through to the same NULL the remaining
-       26 produce. */
+       The names it does not own fall through to the same NULL the other 24
+       produce, of which five are names Apple refuses too. */
     return CGColorSpaceCreateNamedRGBV4(name);
 }
 
@@ -1030,10 +1030,15 @@ static void put_xyz_i32(unsigned char *p, const int32_t v[3])
    OETF variant, which lists blue first -- a difference in the tag table
    alone, invisible in the bytes the two curves would have had. */
 enum {
+    /* Ten tags without the coding tag, eleven with it.  The table starts at
+       132 and every entry is twelve bytes, so the data offset follows from
+       the count rather than being fixed. */
     CGICCRGBV4TagCount = 10,
-    CGICCRGBV4DataOffset = CGICCRGBDataOffset,
+    CGICCRGBV4CicpTagCount = 11,
     /* 'sf32', four reserved bytes, then nine s15Fixed16. */
-    CGICCRGBV4ChadLength = 44
+    CGICCRGBV4ChadLength = 44,
+    /* 'cicp', four reserved bytes, then the four coding bytes. */
+    CGICCRGBV4CicpLength = 12
 };
 
 /* Which component's tone curve tag owns the shared block. */
@@ -1074,6 +1079,12 @@ struct cgs_rgb_v4 {
     struct cgs_icc_curve trc;
     int32_t chad[9];
     int trcOwner;
+    /* Whether the profile carries a 'cicp' tag and a profile ID, which the
+       two groups differ on together: a linearized space has both, and the
+       other eight have neither. */
+    int cicp;
+    int32_t cicpValue[4];
+    int profileId;
 };
 
 /* Round up to the next four-byte boundary.  Tag data is stored aligned, and
@@ -1127,6 +1138,19 @@ static size_t put_icc_curve(unsigned char *p, const struct cgs_icc_curve *c)
 /* The 'chad' block: the Bradford inverse as nine s15Fixed16.  It is an s15Fixed16
    array type rather than a matrix type, so it carries its own signature and
    reserved bytes and holds no tag-style colourants. */
+/* Four reserved bytes then the four coding bytes: which primaries, which
+   transfer, which matrix, and whether the range is full.  All three spaces
+   here are identity-matrix and full-range, so only the primaries differ. */
+static void put_cicp(unsigned char *p, const int32_t v[4])
+{
+    memcpy(p, "cicp", 4);
+    put_be32(p + 4, 0);
+    p[8] = (unsigned char)v[0];
+    p[9] = (unsigned char)v[1];
+    p[10] = (unsigned char)v[2];
+    p[11] = (unsigned char)v[3];
+}
+
 static void put_chad(unsigned char *p, const int32_t v[9])
 {
     int i;
@@ -1172,11 +1196,11 @@ static void put_rgb_v4_header(unsigned char *p, size_t len, const int created[6]
    which is what lets the three curve tags share one block. */
 static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
 {
-    enum { desc, cprt, wtpt, rXYZ, gXYZ, bXYZ, curve, chad, blockCount };
+    enum { desc, cprt, wtpt, rXYZ, gXYZ, bXYZ, curve, chad, cicp, blockCount };
     unsigned char *p;
     size_t dlen, clen, tlen, len;
     int32_t tagOff[blockCount], tagLen[blockCount];
-    int i;
+    int ntags, i, ci;
 
     dlen = 28 + 2 * strlen(v->desc);
     clen = 28 + 2 * strlen(v->cprt);
@@ -1185,7 +1209,8 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
     /* Lay the blocks out first so the total size is known before anything is
        allocated.  The offsets are assigned here and used again below, so the
        two passes cannot disagree about where a block went. */
-    len = CGICCRGBV4DataOffset;
+    ntags = v->cicp ? CGICCRGBV4CicpTagCount : CGICCRGBV4TagCount;
+    len = CGICCTagTableOffset + (size_t)ntags * CGICCTagEntrySize;
     tagLen[desc] = (int32_t)dlen;
     tagOff[desc] = (int32_t)icc_pad(len);
     len = icc_pad(len) + dlen;
@@ -1203,20 +1228,25 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
     tagLen[chad] = CGICCRGBV4ChadLength;
     tagOff[chad] = (int32_t)icc_pad(len);
     len = icc_pad(len) + CGICCRGBV4ChadLength;
+    if (v->cicp) {
+        tagLen[cicp] = CGICCRGBV4CicpLength;
+        tagOff[cicp] = (int32_t)icc_pad(len);
+        len = icc_pad(len) + CGICCRGBV4CicpLength;
+    }
 
     p = calloc(1, len);
     if (!p)
         return NULL;
 
     put_rgb_v4_header(p, len, v->created);
-    put_be32(p + CGICCTagCountOffset, CGICCRGBV4TagCount);
+    put_be32(p + CGICCTagCountOffset, (uint32_t)ntags);
 
     /* The tag table: the two strings, the white point, the colorants in red,
-       green, blue order, then the first tone curve, 'chad', and the other two
-       curves.  The curve order is the only part that varies, and it varies
-       with which component owns the shared block. */
-    for (i = 0; i < CGICCRGBV4TagCount; i++) {
-        static const char *const fixed[CGICCRGBV4TagCount] = {
+       green, blue order, then the first tone curve, 'chad', an optional
+       'cicp', and the other two curves.  Two things vary: which component
+       owns the shared curve block, and whether the coding tag is present. */
+    for (i = 0, ci = 0; i < ntags; i++) {
+        static const char *const fixed[6] = {
             "desc", "cprt", "wtpt", "rXYZ", "gXYZ", "bXYZ"
         };
         static const char *const trcOrder[2][3] = {
@@ -1224,7 +1254,7 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
             { "bTRC", "rTRC", "gTRC" }
         };
         unsigned char *e = p + CGICCTagTableOffset + i * CGICCTagEntrySize;
-        const char *name = NULL;
+        const char *name;
         int block;
 
         if (i < 6) {
@@ -1233,8 +1263,11 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
         } else if (i == 7) {
             name = "chad";
             block = chad;
+        } else if (v->cicp && i == 8) {
+            name = "cicp";
+            block = cicp;
         } else {
-            name = trcOrder[v->trcOwner][i == 6 ? 0 : i - 7];
+            name = trcOrder[v->trcOwner][ci++];
             block = curve;
         }
         memcpy(e, name, 4);
@@ -1249,6 +1282,10 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
         put_xyz_i32(p + tagOff[rXYZ + i], v->colorants + 3 * i);
     put_icc_curve(p + tagOff[curve], &v->trc);
     put_chad(p + tagOff[chad], v->chad);
+    if (v->cicp)
+        put_cicp(p + tagOff[cicp], v->cicpValue);
+    if (v->profileId)
+        put_profile_id(p, len);
 
     *outLen = len;
     return p;
@@ -1320,6 +1357,45 @@ static const struct cgs_rgb_v4 ITUR_2020_sRGBGamma = {
     .trc = { 1, 3, 0, 5, { 0x26666, 0xf2a7, 0xd59, 0x13d0, 0xa5b } },  /* parametric curve, function type 3 */
     .chad = { 0x10c42, 0x5de, -0xcda, 0x793, 0xfd90, -0x45e, -0x25d, 0x3dc, 0xc06e },
 };
+/* The three linearized spaces differ from their gamma counterparts in four
+   ways and share the rest: the same colorants, the same 'chad', an identity
+   tone curve, a 'cicp' tag, and a profile ID. */
+static const struct cgs_rgb_v4 LinearSRGB = {
+    .desc = "sRGB IEC61966-2.1 Linear",
+    .created = { 2019, 1, 1, 0, 0, 0 },
+    .cprt = "Copyright Apple Inc., 2019",
+    .wtpt = { 0xf6d6, 0x10000, 0xd32d },
+    .colorants = { 0x6fa2, 0x38f5, 0x390, 0x6299, 0xb785, 0x18da, 0x24a0, 0xf84, 0xb6cf },
+    .trc = { 1, 0, 0, 1, { 0x10000 } },  /* parametric curve, function type 0, one word of 1.0 */
+    .chad = { 0x10c42, 0x5de, -0xcda, 0x793, 0xfd90, -0x45e, -0x25d, 0x3dc, 0xc06e },
+    .cicp = 1,
+    .cicpValue = { 1, 8, 0, 1 },
+    .profileId = 1,
+};
+static const struct cgs_rgb_v4 LinearDisplayP3 = {
+    .desc = "Display P3 Linear",
+    .created = { 2019, 1, 1, 0, 0, 0 },
+    .cprt = "Copyright Apple Inc., 2019",
+    .wtpt = { 0xf6d6, 0x10000, 0xd32d },
+    .colorants = { 0x83df, 0x3dbf, -0x45, 0x4abf, 0xb137, 0xab9, 0x2838, 0x110b, 0xc8b9 },
+    .trc = { 1, 0, 0, 1, { 0x10000 } },  /* parametric curve, function type 0, one word of 1.0 */
+    .chad = { 0x10c42, 0x5de, -0xcda, 0x793, 0xfd90, -0x45e, -0x25d, 0x3dc, 0xc06e },
+    .cicp = 1,
+    .cicpValue = { 12, 8, 0, 1 },
+    .profileId = 1,
+};
+static const struct cgs_rgb_v4 LinearITUR_2020 = {
+    .desc = "Rec. ITU-R BT.2020-1 Linear",
+    .created = { 2019, 1, 1, 0, 0, 0 },
+    .cprt = "Copyright Apple Inc., 2019",
+    .wtpt = { 0xf6d6, 0x10000, 0xd32d },
+    .colorants = { 0xac69, 0x476f, -0x7f, 0x2a69, 0xace3, 0x7ad, 0x2003, 0xbad, 0xcbfe },
+    .trc = { 1, 0, 0, 1, { 0x10000 } },  /* parametric curve, function type 0, one word of 1.0 */
+    .chad = { 0x10c42, 0x5de, -0xcda, 0x793, 0xfd90, -0x45e, -0x25d, 0x3dc, 0xc06e },
+    .cicp = 1,
+    .cicpValue = { 9, 8, 0, 1 },
+    .profileId = 1,
+};
 static const struct cgs_rgb_v4 DisplayP3_709OETF = {
     .desc = "Display P3; ITU-R 709 OETF",
     .created = { 2022, 1, 1, 0, 0, 0 },
@@ -1367,7 +1443,7 @@ static const struct cgs_rgb_v4 ACESCGLinear = {
    Every one of the ten is an immortal singleton: two calls answer the same
    pointer at the immortal retain count, exactly as the device names do.  So
    each row is built on first use and then kept. */
-enum { CGColorSpaceNamedRGBV4Count = 10 };
+enum { CGColorSpaceNamedRGBV4Count = 16 };
 
 static const struct {
     const char *name;
@@ -1383,13 +1459,19 @@ static const struct {
     { "kCGColorSpaceDisplayP3_709OETF", &DisplayP3_709OETF, false },
     { "kCGColorSpaceROMMRGB", &ROMMRGB, false },
     { "kCGColorSpaceDCIP3", &DCIP3, false },
-    { "kCGColorSpaceACESCGLinear", &ACESCGLinear, false }
+    { "kCGColorSpaceACESCGLinear", &ACESCGLinear, false },
+    { "kCGColorSpaceLinearSRGB", &LinearSRGB, false },
+    { "kCGColorSpaceExtendedLinearSRGB", &LinearSRGB, true },
+    { "kCGColorSpaceLinearDisplayP3", &LinearDisplayP3, false },
+    { "kCGColorSpaceExtendedLinearDisplayP3", &LinearDisplayP3, true },
+    { "kCGColorSpaceLinearITUR_2020", &LinearITUR_2020, false },
+    { "kCGColorSpaceExtendedLinearITUR_2020", &LinearITUR_2020, true }
 };
 
 static struct CGColorSpace *CGColorSpaceNamedRGBV4State[CGColorSpaceNamedRGBV4Count];
 
-/* Build, or find, the space one of the ten v4 names resolves to.  Answers NULL
-   for every other name, so the caller can hand it the name it failed to
+/* Build, or find, the space one of the sixteen v4 names resolves to.  Answers
+   NULL for every other name, so the caller can hand it the name it failed to
    recognise and get the same answer back. */
 static CGColorSpaceRef CGColorSpaceCreateNamedRGBV4(CFStringRef name)
 {
@@ -2992,14 +3074,16 @@ bool CGColorSpaceIsWideGamutRGB(CGColorSpaceRef space)
     if (s == NULL)
         return false;
 
-    /* A space built from a profile answers from its colorants, not from a
-       flag, and only an RGB one has the primaries the measure needs.  The
-       same profile handed to CGColorSpaceCreateCalibratedRGB's caller instead
-       reaches the flag path below, which is why the type has to be tested
-       before the flags. */
+    /* A space built from a profile normally answers from its colorants, and
+       only an RGB one has the primaries the measure needs.  The extended flag
+       still overrides, though: the extended-range linear sRGB hands back the
+       very bytes the unextended one does, and calls that wide gamut while the
+       other is not, so the profile alone cannot answer.  The type has to be
+       tested before the flag path below, which is how the same profile handed
+       to a calibrated RGB caller comes out a different answer. */
     if (s->type == CGColorSpaceTypeICC)
-        return s->model == kCGColorSpaceModelRGB && s->profile != NULL
-            && icc_rgb_is_wide(s->profile, s->profileLen);
+        return s->extended || (s->model == kCGColorSpaceModelRGB && s->profile != NULL
+                               && icc_rgb_is_wide(s->profile, s->profileLen));
 
     /* A gamut wider than sRGB is not a property of the profile: a linearized
        RGB space answers true while answering false for an extended range,

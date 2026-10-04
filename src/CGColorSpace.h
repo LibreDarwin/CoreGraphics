@@ -25,7 +25,7 @@
      - CreateLinearized, CreateExtended and their Extended variants,
      - CreateICCBased, CreateWithICCData, CreateWithICCProfile,
        CreateWithColorSyncProfile, CreateWithURL, CreatePlatformProfile,
-     - CreateWithID, and CreateWithName for all but twenty-five names, since
+     - CreateWithID, and CreateWithName for all but nineteen names, since
        the rest resolve to embedded profiles.
 
    The three calibrated spaces do synthesise a profile, and the size varies
@@ -114,22 +114,29 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
    byte-for-byte what CGColorSpaceCreateLab with a D65 or D50 white point
    produces.
 
-   Ten more names resolve to the eight profiles that share one ten-tag v4
-   shape: Display P3, the two ITU-R spaces, BT.2020 with an sRGB gamma, the
-   Display P3 space with a 709 OETF, ROMM RGB, DCI P3 and ACES CG Linear.
-   Their profiles are synthesised from a table of recovered constants rather
-   than computed, and each is byte-for-byte what Apple hands back -- 536 to
-   600 bytes depending on the space.
+   Sixteen more names resolve to the eleven profiles that share a v4 shape:
+   Display P3, the two ITU-R spaces, BT.2020 with an sRGB gamma, the Display
+   P3 space with a 709 OETF, ROMM RGB, DCI P3 and ACES CG Linear, plus the
+   three linearized spaces.  Their profiles are synthesised from a table of
+   recovered constants rather than computed, and each is byte-for-byte what
+   Apple hands back -- 536 to 600 bytes depending on the space.
 
-   Three details of those ten are worth knowing.  Each is an immortal
-   singleton, like the device spaces.  kCGColorSpaceExtendedDisplayP3 and
-   kCGColorSpaceExtendedITUR_2020 take the same profile bytes as their base
-   and are told apart only by the extended-range flag, which is also why they
-   report unequal to it.  And kCGColorSpaceITUR_709 is not called wide gamut
-   despite primaries wider than sRGB's, so the answer comes from the measured
-   triangle area rather than from a per-space flag.
+   Four details of those sixteen are worth knowing.  Each is an immortal
+   singleton, like the device spaces.  kCGColorSpaceExtendedDisplayP3,
+   kCGColorSpaceExtendedITUR_2020 and the three extended linear names take the
+   same profile bytes as their base and are told apart only by the
+   extended-range flag, which is also why they report unequal to it.  And
+   kCGColorSpaceITUR_709 is not called wide gamut despite primaries wider than
+   sRGB's, so that answer comes from the measured triangle area rather than
+   from a per-space flag.
 
-   Every other name returns NULL for now; the remaining twenty-five resolve to
+   The linearized three are where the profile stops being able to answer.
+   kCGColorSpaceLinearSRGB reports *not* wide gamut and
+   kCGColorSpaceExtendedLinearSRGB reports wide gamut, from the very same
+   bytes, so for an ICC space the extended flag has to be consulted alongside
+   the colorants rather than after them.
+
+   Every other name returns NULL for now; the remaining nineteen resolve to
    embedded profiles, which the rest of this file's constructors do not yet
    assemble. */
 CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateWithName(

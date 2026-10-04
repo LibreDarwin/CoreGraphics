@@ -2758,7 +2758,7 @@ int main(void)
 
         /* CreateWithName.  Only names whose answers agree are recorded here.
            Apple resolves 40 of the 45 name constants and this step resolves
-           fifteen, so the other 25 would be a mismatch rather than a test and
+           twenty-one, so the other 19 would be a mismatch rather than a test and
            each one joins this family as its profile template lands.  What is
            recorded is the part that is not obvious from the name: that the
            device names answer the existing singletons, that a pattern name
@@ -2772,10 +2772,10 @@ int main(void)
                 "kCGColorSpaceDeviceCMYK",
                 "kCGColorSpaceColoredPattern",
                 "kCGColorSpaceGenericLab",
-                /* The eight ten-tag v4 profiles, which between them carry ten
-                   names: the two extended-range aliases take the same profile
-                   bytes as their base and differ only in the name and the
-                   extended flag. */
+                /* The eleven v4 profiles, which between them carry sixteen
+                   names: the three extended-range aliases take the same
+                   profile bytes as their base and differ only in the name and
+                   the extended flag. */
                 "kCGColorSpaceDisplayP3",
                 "kCGColorSpaceExtendedDisplayP3",
                 "kCGColorSpaceITUR_709",
@@ -2786,6 +2786,15 @@ int main(void)
                 "kCGColorSpaceROMMRGB",
                 "kCGColorSpaceDCIP3",
                 "kCGColorSpaceACESCGLinear",
+                /* The linearized three, which differ from their gamma
+                   counterparts in carrying a 'cicp' tag and a profile ID
+                   where the others carry neither. */
+                "kCGColorSpaceLinearSRGB",
+                "kCGColorSpaceExtendedLinearSRGB",
+                "kCGColorSpaceLinearDisplayP3",
+                "kCGColorSpaceExtendedLinearDisplayP3",
+                "kCGColorSpaceLinearITUR_2020",
+                "kCGColorSpaceExtendedLinearITUR_2020",
             };
             /* Names Apple itself refuses, so the NULL is a shared answer
                rather than this step's gap.  Unnamed and Invalid are the two
@@ -2827,7 +2836,9 @@ int main(void)
                    both are asserted: an extended-range alias takes the same
                    profile bytes as its base and is told apart only by the
                    first, and Rec. ITU-R BT.709-5 has primaries wider than
-                   sRGB's yet is not called wide gamut. */
+                   sRGB's yet is not called wide gamut.  Linear sRGB is the
+                   sharper case of that: the same profile bytes answer false
+                   on their own and true on the extended-range alias. */
                 int extended;
                 int wide;
             } expect[] = {
@@ -2846,6 +2857,12 @@ int main(void)
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* ROMM RGB */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* DCI P3 */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* ACES CG Linear */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 0 },        /* Linear sRGB */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 1, 1 },        /* Extended Linear sRGB */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* Linear Display P3 */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 1, 1 },        /* Extended Linear Display P3 */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* Linear ITUR_2020 */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 1, 1 },        /* Extended Linear ITUR_2020 */
             };
             size_t i;
 
@@ -2883,7 +2900,7 @@ int main(void)
                     b(l, CGColorSpaceUsesExtendedRange(r) == expect[i].extended);
                     snprintf(l, sizeof l, "nm/%s/wide", resolves[i]);
                     b(l, CGColorSpaceIsWideGamutRGB(r) == expect[i].wide);
-                    /* Every one of these ten is a singleton, so the second
+                    /* Every one of these is a singleton, so the second
                        call answers the same pointer rather than a copy -- the
                        `stable' line above.  Apple goes further and makes them
                        immortal, but that shows as a retain count read through
