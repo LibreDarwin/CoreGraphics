@@ -2444,6 +2444,89 @@ int main(void)
                     if (bodies[bi].ref) CGColorSpaceRelease(bodies[bi].ref);
             }
 
+            /* Where the width of such a body comes from.  The LUT's own
+               inputChannels byte is the only thing that scales with the
+               answer -- 4 on the shipped CMYK profile, 3 on the shipped Lab
+               one -- and it is what the implementation reads.
+
+               It cannot be varied independently to confirm that, and the
+               reason is the point: writing 4 into the Lab LUT does not produce
+               a four-channel body, it produces a refusal.  Apple checks the
+               LUT against the table it describes (the CLUT begins at offset 48
+               in both 'mft1' and 'mft2' payloads, and the cell count implied by
+               inputChannels, outputChannels and clutPoints has to fit the
+               declared length), and 9^3 cells do not fit a 124-byte tag where
+               9^2 ones did.  The formula is Apple's private one and is not
+               recoverable from the two shipped profiles, so those cases are
+               recorded as a documented divergence under icc/lutgeom/ rather
+               than silently dropped: we accept a hand-corrupted LUT that Apple
+               refuses.  No well-formed profile reaches this -- every shipped
+               profile has a self-consistent LUT -- so the divergence is only
+               reachable by corrupting a profile by hand.
+
+               The declared length itself is not validated, which is checkable
+               and is checked: growing 'A2B0' by a byte is still accepted. */
+            {
+                CGColorSpaceRef lab = CGColorSpaceCreateLab(icc_d50, NULL, NULL);
+                CFDataRef bd = lab ? CGColorSpaceCopyICCData(lab) : NULL;
+                size_t bl = bd ? (size_t)CFDataGetLength(bd) : 0;
+                unsigned char *bb = (unsigned char *)malloc(bl);
+                static const struct { const char *tag; const char *sig; } s2[] = {
+                    { "3clr", "3CLR" }, { "4clr", "4CLR" },
+                };
+                size_t si;
+
+                for (si = 0; si < 2; si++) {
+                    unsigned char orig_in;
+                    CFDataRef dd;
+                    CGColorSpaceRef s;
+                    uint32_t k, ae = 0, ao = 0, ntags;
+
+                    memcpy(bb, CFDataGetBytePtr(bd), bl);
+                    ntags = ((uint32_t)bb[128] << 24) | ((uint32_t)bb[129] << 16)
+                        | ((uint32_t)bb[130] << 8) | bb[131];
+                    for (k = 0; k < ntags; k++) {
+                        const unsigned char *e = bb + 132 + k * 12;
+                        if (memcmp(e, "A2B0", 4) == 0) {
+                            ae = 132 + k * 12;
+                            ao = ((uint32_t)e[4] << 24) | ((uint32_t)e[5] << 16)
+                                | ((uint32_t)e[6] << 8) | e[7];
+                            break;
+                        }
+                    }
+                    if (!ao) { free(bb); break; }
+                    orig_in = bb[ao + 8];
+
+                    /* the byte on its own */
+                    memcpy(bb + 16, s2[si].sig, 4);
+                    bb[ao + 8] = 4;
+                    dd = CFDataCreate(kCFAllocatorDefault, bb, (CFIndex)bl);
+                    s = CGColorSpaceCreateWithICCData(dd);
+                    snprintf(l, sizeof l, "icc/lutgeom/%s/in4", s2[si].tag);
+                    b(l, s != NULL);
+                    if (s) {
+                        snprintf(l, sizeof l, "icc/lutgeom/%s/in4/ncomp", s2[si].tag);
+                        n(l, (long long)CGColorSpaceGetNumberOfComponents(s));
+                    }
+                    CGColorSpaceRelease(s);
+                    CFRelease(dd);
+
+                    /* and the declared length grown by one, in the tag table */
+                    bb[ao + 8] = orig_in;
+                    bb[ae + 11]++;
+                    dd = CFDataCreate(kCFAllocatorDefault, bb, (CFIndex)bl);
+                    s = CGColorSpaceCreateWithICCData(dd);
+                    snprintf(l, sizeof l, "icc/lutlen/%s", s2[si].tag);
+                    b(l, s != NULL);
+                    CGColorSpaceRelease(s);
+                    CFRelease(dd);
+                    bb[ae + 11]--;
+                }
+                free(bb);
+                if (bd) CFRelease(bd);
+                if (lab) CGColorSpaceRelease(lab);
+            }
+
             for (i2 = 0; i2 < nn; i2++)
                 if (srcspace[i2]) CGColorSpaceRelease(srcspace[i2]);
         }

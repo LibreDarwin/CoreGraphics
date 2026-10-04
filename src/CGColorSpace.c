@@ -1808,6 +1808,37 @@ static int icc_has(const unsigned char *p, uint32_t count, const char *sig)
    inputChannels to 3 on the same body still refuses '3CLR'.  So the count is
    read from somewhere inside the LUT that has not been isolated, and 'CMYK'
    is a stand-in that covers only the signature-as-shipped case. */
+/* A body's channel count, when it is described by an 'A2B0' LUT, is that LUT's
+   own inputChannels byte: the shipped CMYK profile says 4 and reports four
+   channels, the shipped Lab profile says 3 and reports three.  The signature
+   cannot be the source, because overwriting that byte on either profile makes
+   Apple refuse the profile outright -- 'A2B0' has to stay consistent with the
+   table it describes -- instead of answering a different channel count.  That
+   is also why no mutation of this byte can ever be observed to change the
+   answer, and why the reported length is not checked either: growing 'A2B0'
+   by a byte is still accepted.
+
+   Returns the count, or -1 when there is no usable 'A2B0'. */
+static int icc_lut_channels(const unsigned char *p, uint32_t count)
+{
+    uint32_t i;
+
+    for (i = 0; i < count; i++) {
+        const unsigned char *e = p + CGICCTagTableOffset
+            + (size_t)i * CGICCTagEntrySize;
+        uint64_t off, size;
+
+        if (memcmp(e, "A2B0", 4) != 0)
+            continue;
+        off = get_be32(e + 4);
+        size = get_be32(e + 8);
+        if (size < 9)
+            return -1;
+        return p[off + 8];
+    }
+    return -1;
+}
+
 static int icc_body_model(const unsigned char *p, uint32_t count,
     CGColorSpaceModel *model, size_t *ncomp, const char *const **required,
     int *nclass)
@@ -1824,13 +1855,22 @@ static int icc_body_model(const unsigned char *p, uint32_t count,
         *required = rgb; *nclass = 2; return 1;
     }
     if (icc_has(p, count, "A2B0") && icc_has(p, count, "B2A0")) {
-        /* Four channels, or three: 'CMYK' is the only four-channel body. */
-        if (memcmp(p + CGICCColorSpaceOffset, "CMYK", 4) == 0) {
+        int n = icc_lut_channels(p, count);
+
+        /* Three and four are the only widths with a body to measure against,
+           and the 'nCLR' signature still has to name a space of that width:
+           the CMYK body takes '4CLR' and refuses '3CLR' and '5CLR', the Lab
+           body takes '3CLR' and refuses '4CLR'.  A five- or six-channel body
+           would need a consistent LUT that no shipped profile provides, so
+           those are refused rather than guessed at. */
+        if (n == 4) {
             *model = kCGColorSpaceModelCMYK; *ncomp = 4;
             *required = cmyk;
-        } else {
+        } else if (n == 3) {
             *model = kCGColorSpaceModelXYZ; *ncomp = 3;
             *required = xyz;
+        } else {
+            return 0;
         }
         *nclass = 5; return 1;
     }
