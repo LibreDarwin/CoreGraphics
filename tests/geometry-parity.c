@@ -2758,7 +2758,7 @@ int main(void)
 
         /* CreateWithName.  Only names whose answers agree are recorded here.
            Apple resolves 40 of the 45 name constants and this step resolves
-           five, so the other 35 would be a mismatch rather than a test and
+           fifteen, so the other 25 would be a mismatch rather than a test and
            each one joins this family as its profile template lands.  What is
            recorded is the part that is not obvious from the name: that the
            device names answer the existing singletons, that a pattern name
@@ -2772,6 +2772,20 @@ int main(void)
                 "kCGColorSpaceDeviceCMYK",
                 "kCGColorSpaceColoredPattern",
                 "kCGColorSpaceGenericLab",
+                /* The eight ten-tag v4 profiles, which between them carry ten
+                   names: the two extended-range aliases take the same profile
+                   bytes as their base and differ only in the name and the
+                   extended flag. */
+                "kCGColorSpaceDisplayP3",
+                "kCGColorSpaceExtendedDisplayP3",
+                "kCGColorSpaceITUR_709",
+                "kCGColorSpaceITUR_2020",
+                "kCGColorSpaceExtendedITUR_2020",
+                "kCGColorSpaceITUR_2020_sRGBGamma",
+                "kCGColorSpaceDisplayP3_709OETF",
+                "kCGColorSpaceROMMRGB",
+                "kCGColorSpaceDCIP3",
+                "kCGColorSpaceACESCGLinear",
             };
             /* Names Apple itself refuses, so the NULL is a shared answer
                rather than this step's gap.  Unnamed and Invalid are the two
@@ -2808,12 +2822,30 @@ int main(void)
                 size_t ncomp;
                 int type;
                 int out;
+                /* Whether the name reports an extended range, and whether it
+                   reports a wide gamut.  Neither follows from the spelling, so
+                   both are asserted: an extended-range alias takes the same
+                   profile bytes as its base and is told apart only by the
+                   first, and Rec. ITU-R BT.709-5 has primaries wider than
+                   sRGB's yet is not called wide gamut. */
+                int extended;
+                int wide;
             } expect[] = {
-                { kCGColorSpaceModelMonochrome, 1, 0, 1 }, /* DeviceGray */
-                { kCGColorSpaceModelRGB, 3, 1, 1 },        /* DeviceRGB */
-                { kCGColorSpaceModelCMYK, 4, 2, 1 },       /* DeviceCMYK */
-                { kCGColorSpaceModelPattern, 0, 9, 0 },    /* ColoredPattern */
-                { kCGColorSpaceModelLab, 3, 5, 1 },        /* GenericLab */
+                { kCGColorSpaceModelMonochrome, 1, 0, 1, 0, 0 }, /* DeviceGray */
+                { kCGColorSpaceModelRGB, 3, 1, 1, 0, 0 },        /* DeviceRGB */
+                { kCGColorSpaceModelCMYK, 4, 2, 1, 0, 0 },       /* DeviceCMYK */
+                { kCGColorSpaceModelPattern, 0, 9, 0, 0, 0 },    /* ColoredPattern */
+                { kCGColorSpaceModelLab, 3, 5, 1, 0, 0 },        /* GenericLab */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* DisplayP3 */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 1, 1 },        /* Extended DisplayP3 */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 0 },        /* ITUR_709 */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* ITUR_2020 */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 1, 1 },        /* Extended ITUR_2020 */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* ITUR_2020 sRGBGamma */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* DisplayP3 709OETF */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* ROMM RGB */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* DCI P3 */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* ACES CG Linear */
             };
             size_t i;
 
@@ -2847,6 +2879,16 @@ int main(void)
                        Apple agrees: both return the same address. */
                     snprintf(l, sizeof l, "nm/%s/stable", resolves[i]);
                     b(l, CGColorSpaceCreateWithName(s) == r);
+                    snprintf(l, sizeof l, "nm/%s/extended", resolves[i]);
+                    b(l, CGColorSpaceUsesExtendedRange(r) == expect[i].extended);
+                    snprintf(l, sizeof l, "nm/%s/wide", resolves[i]);
+                    b(l, CGColorSpaceIsWideGamutRGB(r) == expect[i].wide);
+                    /* Every one of these ten is a singleton, so the second
+                       call answers the same pointer rather than a copy -- the
+                       `stable' line above.  Apple goes further and makes them
+                       immortal, but that shows as a retain count read through
+                       the CF runtime rather than as anything a caller can
+                       compare, so the identity is the part recorded here. */
                     CGColorSpaceRelease(r);
                 }
                 CFRelease(s);

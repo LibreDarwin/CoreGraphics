@@ -198,6 +198,12 @@ static struct CGColorSpace CGColorSpaceDeviceCMYKState = {
    first call this is null. */
 static struct CGColorSpace *CGColorSpaceGenericLabState;
 
+/* Declared ahead of its first use by CGColorSpaceCreateWithName: the ten names
+   that resolve to the eight ten-tag v4 profiles are built here, and the
+   definition sits with the profile emitters.  It answers NULL for any other
+   name, which is how CGColorSpaceCreateWithName falls through. */
+static CGColorSpaceRef CGColorSpaceCreateNamedRGBV4(CFStringRef name);
+
 /* The name a pattern space reports when it has no base.  A pattern space
    built on a base has no name of its own, so this is the only pattern name
    in this step. */
@@ -442,11 +448,15 @@ CGColorSpaceRef CGColorSpaceCreateWithName(CFStringRef name)
         return s;
     }
 
-    /* The remaining 36 names resolve to spaces carrying embedded profiles that
-       this step cannot emit yet.  Returning NULL is a visible difference from
-       Apple rather than a deferral that hides: it is why GenericLab and the
-       device names are the whole of what works so far. */
-    return NULL;
+    /* Ten of the remaining names resolve to the eight profiles that share the
+       ten-tag v4 template, and CGColorSpaceCreateNamedRGBV4 answers for exactly
+       those ten -- including the two extended-range aliases, which take the
+       same profile bytes as their base and differ only in the name they
+       report and the extended flag they carry.
+
+       The names it does not own fall through to the same NULL the remaining
+       26 produce. */
+    return CGColorSpaceCreateNamedRGBV4(name);
 }
 
 /* Create an indexed color space.  `lastIndex' names the largest valid index,
@@ -507,6 +517,7 @@ CGColorSpaceRef CGColorSpaceCreateIndexed(CGColorSpaceRef baseSpace,
 /* Declared ahead of its first use: the gray builder needs to repoint tag
    table entries, and the definition sits with the calibrated-RGB helpers. */
 static void put_be32(unsigned char *p, int32_t v);
+static void put_be16(unsigned char *p, unsigned v);
 
 /* Offsets into the gray template, named so the patch sites read as what they
    are rather than as magic numbers. */
@@ -996,6 +1007,423 @@ static void put_xyz_i32(unsigned char *p, const int32_t v[3])
     put_be32(p + 8, v[0]);
     put_be32(p + 12, v[1]);
     put_be32(p + 16, v[2]);
+}
+
+/* The ten-tag v4 matrix/TRC template.
+
+   Eight of the named RGB spaces resolve to profiles of one shape: a v4 header,
+   ten tags and nothing else.  They are Display P3, the two ITU-R spaces, the
+   BT.2020 space with an sRGB gamma, the Display P3 space with a 709 OETF,
+   ROMM RGB, DCI P3 and ACES CG Linear, which between them the ten names
+   because two of them have an extended-range alias.
+
+   The template differs from the calibrated one above in three ways that all
+   show in the tag table.  There is no black point, so the white point follows
+   the colorants directly.  A 'chad' tag sits between the first tone curve and
+   the last two, carrying the Bradford inverse that adapts the D50-stored
+   colorants to the profile's own white point.  And the three tone curve tags
+   all point at one shared block rather than at three separate curves, so the
+   space's name costs one curve instead of three.
+
+   The block that the curves share belongs to whichever component's tag the
+   table lists first.  That is red in every space here except Display P3's 709
+   OETF variant, which lists blue first -- a difference in the tag table
+   alone, invisible in the bytes the two curves would have had. */
+enum {
+    CGICCRGBV4TagCount = 10,
+    CGICCRGBV4DataOffset = CGICCRGBDataOffset,
+    /* 'sf32', four reserved bytes, then nine s15Fixed16. */
+    CGICCRGBV4ChadLength = 44
+};
+
+/* Which component's tone curve tag owns the shared block. */
+enum {
+    CGICCRGBTRCRedFirst = 0,
+    CGICCRGBTRCBlueFirst = 1
+};
+
+/* A tone curve as these profiles store one.
+
+   A parametric curve is a 'para' block: four signature bytes, four reserved,
+   the function type, two more reserved, then the parameters as s15Fixed16.
+   The function type occupies two bytes and not the four the specification
+   gives it, which is worth saying because a reader who assumes the wider
+   field lands on the parameters and finds a plausible-looking number there.
+
+   A simple curve is a 'curv' block instead: the signature, four reserved, a
+   count of one as a four-byte field, and a u8Fixed8 gamma.  The count is a
+   four-byte field here, unlike the two-byte function type above, so the two
+   are not laid out alike even though both are curves. */
+struct cgs_icc_curve {
+    int parametric;
+    int function;
+    int gamma;
+    int words;
+    int32_t word[5];
+};
+
+/* One space's parameters.  The colorants, the Bradford inverse in 'chad' and
+   the curve are all constants recovered from the profile the name resolves
+   to, so nothing here is computed at run time. */
+struct cgs_rgb_v4 {
+    const char *desc;
+    const char *cprt;
+    int created[6];
+    int32_t wtpt[3];
+    int32_t colorants[9];
+    struct cgs_icc_curve trc;
+    int32_t chad[9];
+    int trcOwner;
+};
+
+/* Round up to the next four-byte boundary.  Tag data is stored aligned, and
+   the pad counts toward the profile size while belonging to no tag. */
+static size_t icc_pad(size_t off)
+{
+    return (off + 3) & ~(size_t)3;
+}
+
+/* A 'mluc' record holding one en-US string.  Its length field counts the
+   bytes of UTF-16 rather than characters, the offset is absolute in the
+   profile rather than relative to the tag, and the record itself is twelve
+   bytes.  Returns the length of the whole block. */
+static size_t put_mluc(unsigned char *p, const char *utf8)
+{
+    size_t chars = strlen(utf8), i;
+
+    memcpy(p, "mluc", 4);
+    put_be32(p + 4, 0);
+    put_be32(p + 8, 1);
+    put_be32(p + 12, 12);
+    memcpy(p + 16, "enUS", 4);
+    put_be32(p + 20, (int32_t)(2 * chars));
+    put_be32(p + 24, 28);
+    for (i = 0; i < chars; i++)
+        put_be16(p + 28 + 2 * i, (unsigned char)utf8[i]);
+    return 28 + 2 * chars;
+}
+
+/* One tone curve, of either kind.  Returns the length of the block. */
+static size_t put_icc_curve(unsigned char *p, const struct cgs_icc_curve *c)
+{
+    int i;
+
+    if (!c->parametric) {
+        memcpy(p, "curv", 4);
+        put_be32(p + 4, 0);
+        put_be32(p + 8, 1);
+        put_be16(p + 12, (unsigned)c->gamma);
+        return 14;
+    }
+    memcpy(p, "para", 4);
+    put_be32(p + 4, 0);
+    put_be16(p + 8, (unsigned)c->function);
+    put_be16(p + 10, 0);
+    for (i = 0; i < c->words; i++)
+        put_be32(p + 12 + 4 * i, c->word[i]);
+    return 12 + 4 * c->words;
+}
+
+/* The 'chad' block: the Bradford inverse as nine s15Fixed16.  It is an s15Fixed16
+   array type rather than a matrix type, so it carries its own signature and
+   reserved bytes and holds no tag-style colourants. */
+static void put_chad(unsigned char *p, const int32_t v[9])
+{
+    int i;
+
+    memcpy(p, "sf32", 4);
+    put_be32(p + 4, 0);
+    for (i = 0; i < 9; i++)
+        put_be32(p + 8 + 4 * i, v[i]);
+}
+
+/* The v4 header.  Every field is written out rather than copied from a
+   transcribed template, so the two that vary -- the size and the creation date
+   -- are patched last and the rest are visible at their offsets.  The profile
+   ID is left zero, which is not a placeholder: none of these eight profiles
+   carries a digest, so there is nothing for put_profile_id to compute.
+
+   The illuminant is three bare s15Fixed16 with no 'XYZ ' signature in front of
+   them, the one XYZ triple in a profile that is not a tag. */
+static void put_rgb_v4_header(unsigned char *p, size_t len, const int created[6])
+{
+    int i;
+
+    put_be32(p + CGICCProfileSizeOffset, (int32_t)len);
+    memcpy(p + 4, "appl", 4);
+    put_be32(p + CGICCVersionOffset, 0x04000000);
+    memcpy(p + CGICCDeviceClassOffset, "mntr", 4);
+    memcpy(p + CGICCColorSpaceOffset, "RGB ", 4);
+    memcpy(p + CGICCColorSpaceOffset + 4, "XYZ ", 4);
+    for (i = 0; i < 6; i++)
+        put_be16(p + 24 + 2 * i, (unsigned)created[i]);
+    memcpy(p + CGICCSignatureOffset, "acsp", 4);
+    memcpy(p + 40, "APPL", 4);
+    memcpy(p + 48, "APPL", 4);
+    put_be32(p + 68, 0x0000f6d6);
+    put_be32(p + 72, 0x00010000);
+    put_be32(p + 76, 0x0000d32d);
+    memcpy(p + 80, "appl", 4);
+}
+
+/* Assemble the profile for one of the eight spaces.  Eight blocks are emitted
+   -- the two strings, the white point, the three colorants, the shared curve
+   and the Bradford inverse -- and the ten tags are pointed at them afterwards,
+   which is what lets the three curve tags share one block. */
+static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
+{
+    enum { desc, cprt, wtpt, rXYZ, gXYZ, bXYZ, curve, chad, blockCount };
+    unsigned char *p;
+    size_t dlen, clen, tlen, len;
+    int32_t tagOff[blockCount], tagLen[blockCount];
+    int i;
+
+    dlen = 28 + 2 * strlen(v->desc);
+    clen = 28 + 2 * strlen(v->cprt);
+    tlen = v->trc.parametric ? 12 + 4 * (size_t)v->trc.words : 14;
+
+    /* Lay the blocks out first so the total size is known before anything is
+       allocated.  The offsets are assigned here and used again below, so the
+       two passes cannot disagree about where a block went. */
+    len = CGICCRGBV4DataOffset;
+    tagLen[desc] = (int32_t)dlen;
+    tagOff[desc] = (int32_t)icc_pad(len);
+    len = icc_pad(len) + dlen;
+    tagLen[cprt] = (int32_t)clen;
+    tagOff[cprt] = (int32_t)icc_pad(len);
+    len = icc_pad(len) + clen;
+    for (i = wtpt; i <= bXYZ; i++) {
+        tagLen[i] = CGICCXYZLength;
+        tagOff[i] = (int32_t)icc_pad(len);
+        len = icc_pad(len) + CGICCXYZLength;
+    }
+    tagLen[curve] = (int32_t)tlen;
+    tagOff[curve] = (int32_t)icc_pad(len);
+    len = icc_pad(len) + tlen;
+    tagLen[chad] = CGICCRGBV4ChadLength;
+    tagOff[chad] = (int32_t)icc_pad(len);
+    len = icc_pad(len) + CGICCRGBV4ChadLength;
+
+    p = calloc(1, len);
+    if (!p)
+        return NULL;
+
+    put_rgb_v4_header(p, len, v->created);
+    put_be32(p + CGICCTagCountOffset, CGICCRGBV4TagCount);
+
+    /* The tag table: the two strings, the white point, the colorants in red,
+       green, blue order, then the first tone curve, 'chad', and the other two
+       curves.  The curve order is the only part that varies, and it varies
+       with which component owns the shared block. */
+    for (i = 0; i < CGICCRGBV4TagCount; i++) {
+        static const char *const fixed[CGICCRGBV4TagCount] = {
+            "desc", "cprt", "wtpt", "rXYZ", "gXYZ", "bXYZ"
+        };
+        static const char *const trcOrder[2][3] = {
+            { "rTRC", "bTRC", "gTRC" },
+            { "bTRC", "rTRC", "gTRC" }
+        };
+        unsigned char *e = p + CGICCTagTableOffset + i * CGICCTagEntrySize;
+        const char *name = NULL;
+        int block;
+
+        if (i < 6) {
+            name = fixed[i];
+            block = i;
+        } else if (i == 7) {
+            name = "chad";
+            block = chad;
+        } else {
+            name = trcOrder[v->trcOwner][i == 6 ? 0 : i - 7];
+            block = curve;
+        }
+        memcpy(e, name, 4);
+        put_be32(e + 4, tagOff[block]);
+        put_be32(e + 8, tagLen[block]);
+    }
+
+    put_mluc(p + tagOff[desc], v->desc);
+    put_mluc(p + tagOff[cprt], v->cprt);
+    put_xyz_i32(p + tagOff[wtpt], v->wtpt);
+    for (i = 0; i < 3; i++)
+        put_xyz_i32(p + tagOff[rXYZ + i], v->colorants + 3 * i);
+    put_icc_curve(p + tagOff[curve], &v->trc);
+    put_chad(p + tagOff[chad], v->chad);
+
+    *outLen = len;
+    return p;
+}
+
+/* The eight spaces.  Each row was recovered from the profile its name resolves
+   to, and put_rgb_v4 was checked against all eight by rebuilding each profile
+   and comparing it byte for byte with the one Apple hands back.
+
+   Two details are visible in the tag table rather than in the values, so they
+   are worth stating here.  All three tone curve tags point at one shared block
+   and that block belongs to whichever component's tag comes first -- red in
+   every space here except DisplayP3_709OETF, which lists blue first.  And
+   'wtpt' sits one quantisation unit below the header illuminant in seven of
+   the eight; Rec. ITU-R BT.2020-1 is the one whose white point equals the
+   illuminant. */
+
+/* The eight profiles that share the ten-tag v4 template, one row each.
+
+   Every field below was recovered from the profile its name resolves to,
+   and the emitter that consumes these rows was checked against all eight
+   by rebuilding each profile and comparing it byte for byte.  Nothing here
+   is computed at runtime: the colorants, the Bradford inverse that 'chad'
+   holds and the tone curve parameters are all constants, so the table is a
+   few hundred bytes of data rather than a second colorimetry
+   implementation.
+
+   Two details are worth naming because they show in the tag table rather
+   than in the values.  All three tone curve tags point at one shared
+   block, and that block belongs to whichever component's tag is listed
+   first -- red for every space here except DisplayP3_709OETF, which lists
+   blue first.  And 'wtpt' sits one quantisation unit below the header
+   illuminant for seven of the eight; Rec. ITU-R BT.2020-1 is the one whose
+   white point equals the illuminant. */
+
+static const struct cgs_rgb_v4 DisplayP3 = {
+    .desc = "Display P3",
+    .created = { 2022, 1, 1, 0, 0, 0 },
+    .cprt = "Copyright Apple Inc., 2022",
+    .wtpt = { 0xf6d5, 0x10000, 0xd32c },
+    .colorants = { 0x83df, 0x3dbf, -0x45, 0x4abf, 0xb137, 0xab9, 0x2838, 0x110b, 0xc8b9 },
+    .trc = { 1, 3, 0, 5, { 0x26666, 0xf2a7, 0xd59, 0x13d0, 0xa5b } },  /* parametric curve, function type 3 */
+    .chad = { 0x10c42, 0x5de, -0xcda, 0x793, 0xfd90, -0x45e, -0x25d, 0x3dc, 0xc06e },
+};
+static const struct cgs_rgb_v4 ITUR_709 = {
+    .desc = "Rec. ITU-R BT.709-5",
+    .created = { 2022, 1, 1, 0, 0, 0 },
+    .cprt = "Copyright Apple Inc., 2022",
+    .wtpt = { 0xf6d5, 0x10000, 0xd32c },
+    .colorants = { 0x6fa2, 0x38f5, 0x390, 0x6299, 0xb785, 0x18da, 0x24a0, 0xf84, 0xb6cf },
+    .trc = { 1, 3, 0, 5, { 0x238e4, 0xe8f0, 0x1710, 0x38e4, 0x14bc } },  /* parametric curve, function type 3 */
+    .chad = { 0x10c42, 0x5de, -0xcda, 0x793, 0xfd90, -0x45e, -0x25d, 0x3dc, 0xc06e },
+};
+static const struct cgs_rgb_v4 ITUR_2020 = {
+    .desc = "Rec. ITU-R BT.2020-1",
+    .created = { 2023, 6, 9, 9, 54, 38 },
+    .cprt = "Copyright Apple Inc., 2023",
+    .wtpt = { 0xf6d6, 0x10000, 0xd32d },
+    .colorants = { 0xac69, 0x476f, -0x7f, 0x2a69, 0xace3, 0x7ad, 0x2003, 0xbad, 0xcbfe },
+    .trc = { 1, 3, 0, 5, { 0x238e4, 0xe8e0, 0x1720, 0x38e4, 0x14bc } },  /* parametric curve, function type 3 */
+    .chad = { 0x10c42, 0x5de, -0xcda, 0x793, 0xfd90, -0x45e, -0x25d, 0x3dc, 0xc06e },
+};
+static const struct cgs_rgb_v4 ITUR_2020_sRGBGamma = {
+    .desc = "Rec. ITU-R BT.2020-1; sRGB Gamma",
+    .created = { 2022, 1, 1, 0, 0, 0 },
+    .cprt = "Copyright Apple Inc., 2022",
+    .wtpt = { 0xf6d5, 0x10000, 0xd32c },
+    .colorants = { 0xac69, 0x476f, -0x7f, 0x2a69, 0xace3, 0x7ad, 0x2003, 0xbad, 0xcbfe },
+    .trc = { 1, 3, 0, 5, { 0x26666, 0xf2a7, 0xd59, 0x13d0, 0xa5b } },  /* parametric curve, function type 3 */
+    .chad = { 0x10c42, 0x5de, -0xcda, 0x793, 0xfd90, -0x45e, -0x25d, 0x3dc, 0xc06e },
+};
+static const struct cgs_rgb_v4 DisplayP3_709OETF = {
+    .desc = "Display P3; ITU-R 709 OETF",
+    .created = { 2022, 1, 1, 0, 0, 0 },
+    .cprt = "Copyright Apple Inc., 2022",
+    .wtpt = { 0xf6d5, 0x10000, 0xd32c },
+    .colorants = { 0x83df, 0x3dbf, -0x45, 0x4abf, 0xb137, 0xab9, 0x2838, 0x110b, 0xc8b9 },
+    .trc = { 1, 3, 0, 5, { 0x238e4, 0xe8f0, 0x1710, 0x38e4, 0x14bc } },  /* parametric curve, function type 3 */
+    .chad = { 0x10c42, 0x5de, -0xcda, 0x793, 0xfd90, -0x45e, -0x25d, 0x3dc, 0xc06e },
+    .trcOwner = CGICCRGBTRCBlueFirst,
+};
+static const struct cgs_rgb_v4 ROMMRGB = {
+    .desc = "ROMM RGB: ISO 22028-2:2013",
+    .created = { 2022, 1, 1, 0, 0, 0 },
+    .cprt = "Copyright Apple Inc., 2022",
+    .wtpt = { 0xf6d5, 0x10000, 0xd32c },
+    .colorants = { 0xcc34, 0x49bd, 0x0, 0x229c, 0xb63e, 0x0, 0x807, 0x6, 0xd340 },
+    .trc = { 1, 3, 0, 5, { 0x1cccd, 0x10000, 0x0, 0x1000, 0x80 } },  /* parametric curve, function type 3 */
+    .chad = { 0x10000, 0x0, 0x0, 0x0, 0x10000, 0x0, 0x0, 0x0, 0x10000 },
+};
+static const struct cgs_rgb_v4 DCIP3 = {
+    .desc = "SMPTE RP 431-2-2007 DCI (P3)",
+    .created = { 2022, 1, 1, 0, 0, 0 },
+    .cprt = "Copyright Apple Inc., 2022",
+    .wtpt = { 0xf6d5, 0x10000, 0xd32c },
+    .colorants = { 0x7c75, 0x3a08, -0x35, 0x52e8, 0xb5d8, 0xb11, 0x2779, 0x1020, 0xc850 },
+    .trc = { 1, 0, 0, 1, { 0x2999a } },  /* parametric curve, function type 0 */
+    .chad = { 0x112e6, 0x9ef, -0x972, 0xe3a, 0xf6c8, -0x3ac, -0x118, 0x15b, 0xdcdf },
+};
+static const struct cgs_rgb_v4 ACESCGLinear = {
+    .desc = "ACES CG Linear (Academy Color Encoding System AP1)",
+    .created = { 2022, 1, 1, 0, 0, 0 },
+    .cprt = "Copyright Apple Inc., 2022",
+    .wtpt = { 0xf6d5, 0x10000, 0xd32c },
+    .colorants = { 0xb09c, 0x48d6, -0x18c, 0x2657, 0xabf4, 0x290, 0x1fe3, 0xb36, 0xd229 },
+    .trc = { 0, 0, 256, 0, { 0x0 } },  /* u8Fixed8 gamma */
+    .chad = { 0x108bf, 0x44e, -0x997, 0x589, 0xfe03, -0x341, -0x1c6, 0x2e6, 0xd021 },
+};
+
+/* The ten names those eight profiles answer to, and the space each one builds.
+   An extended-range name takes the same profile bytes as its base -- the
+   profile carries no range, and the two spaces are reported unequal because
+   the flag below is what differs -- so it is the name and the flag that are
+   per-space rather than the profile.
+
+   Every one of the ten is an immortal singleton: two calls answer the same
+   pointer at the immortal retain count, exactly as the device names do.  So
+   each row is built on first use and then kept. */
+enum { CGColorSpaceNamedRGBV4Count = 10 };
+
+static const struct {
+    const char *name;
+    const struct cgs_rgb_v4 *profile;
+    bool extended;
+} CGColorSpaceNamedRGBV4[CGColorSpaceNamedRGBV4Count] = {
+    { "kCGColorSpaceDisplayP3", &DisplayP3, false },
+    { "kCGColorSpaceExtendedDisplayP3", &DisplayP3, true },
+    { "kCGColorSpaceITUR_709", &ITUR_709, false },
+    { "kCGColorSpaceITUR_2020", &ITUR_2020, false },
+    { "kCGColorSpaceExtendedITUR_2020", &ITUR_2020, true },
+    { "kCGColorSpaceITUR_2020_sRGBGamma", &ITUR_2020_sRGBGamma, false },
+    { "kCGColorSpaceDisplayP3_709OETF", &DisplayP3_709OETF, false },
+    { "kCGColorSpaceROMMRGB", &ROMMRGB, false },
+    { "kCGColorSpaceDCIP3", &DCIP3, false },
+    { "kCGColorSpaceACESCGLinear", &ACESCGLinear, false }
+};
+
+static struct CGColorSpace *CGColorSpaceNamedRGBV4State[CGColorSpaceNamedRGBV4Count];
+
+/* Build, or find, the space one of the ten v4 names resolves to.  Answers NULL
+   for every other name, so the caller can hand it the name it failed to
+   recognise and get the same answer back. */
+static CGColorSpaceRef CGColorSpaceCreateNamedRGBV4(CFStringRef name)
+{
+    struct CGColorSpace *s;
+    unsigned char *profile;
+    size_t len;
+    int i;
+
+    for (i = 0; i < CGColorSpaceNamedRGBV4Count; i++) {
+        if (!CGColorSpaceNameEqualsASCII(name, CGColorSpaceNamedRGBV4[i].name))
+            continue;
+        if (CGColorSpaceNamedRGBV4State[i])
+            return CGColorSpaceNamedRGBV4State[i];
+        profile = put_rgb_v4(CGColorSpaceNamedRGBV4[i].profile, &len);
+        if (!profile)
+            return NULL;
+        s = calloc(1, sizeof *s);
+        if (!s) {
+            free(profile);
+            return NULL;
+        }
+        s->immortal = true;
+        s->model = kCGColorSpaceModelRGB;
+        s->type = CGColorSpaceTypeICC;
+        s->ncomp = 3;
+        /* A literal like the device names', and not owned. */
+        s->name = CGColorSpaceNamedRGBV4[i].name;
+        s->extended = CGColorSpaceNamedRGBV4[i].extended;
+        s->profile = profile;
+        s->profileLen = len;
+        CGColorSpaceNamedRGBV4State[i] = s;
+        return s;
+    }
+    return NULL;
 }
 
 CGColorSpaceRef CGColorSpaceCreateCalibratedRGB(const CGFloat

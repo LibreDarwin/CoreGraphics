@@ -25,8 +25,8 @@
      - CreateLinearized, CreateExtended and their Extended variants,
      - CreateICCBased, CreateWithICCData, CreateWithICCProfile,
        CreateWithColorSyncProfile, CreateWithURL, CreatePlatformProfile,
-     - CreateWithID, and CreateWithName for all but five names, since the rest
-       resolve to embedded profiles.
+     - CreateWithID, and CreateWithName for all but twenty-five names, since
+       the rest resolve to embedded profiles.
 
    The three calibrated spaces do synthesise a profile, and the size varies
    with the shape of the request: 380 bytes for a calibrated gray, 416 to 528
@@ -112,9 +112,26 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
    with no base on every call.  kCGColorSpaceGenericLab is also a singleton,
    built on first use and immortal like the device spaces, and its profile is
    byte-for-byte what CGColorSpaceCreateLab with a D65 or D50 white point
-   produces.  Every other name returns NULL for now; the remaining ones
-   resolve to embedded profiles, which the rest of this file's constructors do
-   not yet assemble. */
+   produces.
+
+   Ten more names resolve to the eight profiles that share one ten-tag v4
+   shape: Display P3, the two ITU-R spaces, BT.2020 with an sRGB gamma, the
+   Display P3 space with a 709 OETF, ROMM RGB, DCI P3 and ACES CG Linear.
+   Their profiles are synthesised from a table of recovered constants rather
+   than computed, and each is byte-for-byte what Apple hands back -- 536 to
+   600 bytes depending on the space.
+
+   Three details of those ten are worth knowing.  Each is an immortal
+   singleton, like the device spaces.  kCGColorSpaceExtendedDisplayP3 and
+   kCGColorSpaceExtendedITUR_2020 take the same profile bytes as their base
+   and are told apart only by the extended-range flag, which is also why they
+   report unequal to it.  And kCGColorSpaceITUR_709 is not called wide gamut
+   despite primaries wider than sRGB's, so the answer comes from the measured
+   triangle area rather than from a per-space flag.
+
+   Every other name returns NULL for now; the remaining twenty-five resolve to
+   embedded profiles, which the rest of this file's constructors do not yet
+   assemble. */
 CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateWithName(
     CFStringRef __nullable name);
 
