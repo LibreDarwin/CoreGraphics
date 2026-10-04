@@ -2551,9 +2551,10 @@ int main(void)
             named[0] = CGColorSpaceCreateDeviceGray();
             named[1] = CGColorSpaceCreateDeviceRGB();
             named[2] = CGColorSpaceCreateDeviceCMYK();
-            { CGColorSpaceRef w = CGColorSpaceCreateDeviceRGB();
-              named[3] = CGColorSpaceCreateLab(w, NULL, NULL);
-              if (w) CGColorSpaceRelease(w); }
+            /* A Lab base, which is one component, so it exercises the same
+               "one byte per entry" path as gray but from a calibrated space. */
+            { static const CGFloat lab_wp[3] = { 0.95047, 1.0, 1.08883 };
+              named[3] = CGColorSpaceCreateLab(lab_wp, NULL, NULL); }
             for (ni = 0; ni < 4; ni++) {
                 size_t nc = named[ni]
                     ? CGColorSpaceGetNumberOfComponents(named[ni]) : 0;
@@ -2752,6 +2753,208 @@ int main(void)
                 snprintf(l, sizeof l, "cs/junk/%zu", i);
                 n(l, CGColorSpaceIDFromName(s));
                 CFRelease(s);
+            }
+        }
+
+        /* CreateWithName.  Only names whose answers agree are recorded here.
+           Apple resolves 40 of the 45 name constants and this step resolves
+           five, so the other 35 would be a mismatch rather than a test and
+           each one joins this family as its profile template lands.  What is
+           recorded is the part that is not obvious from the name: that the
+           device names answer the existing singletons, that a pattern name
+           builds something fresh every call, and that the generic Lab name
+           resolves to precisely the profile CreateLab already emits. */
+        {
+            /* The names that resolve in both. */
+            static const char *const resolves[] = {
+                "kCGColorSpaceDeviceGray",
+                "kCGColorSpaceDeviceRGB",
+                "kCGColorSpaceDeviceCMYK",
+                "kCGColorSpaceColoredPattern",
+                "kCGColorSpaceGenericLab",
+            };
+            /* Names Apple itself refuses, so the NULL is a shared answer
+               rather than this step's gap.  Unnamed and Invalid are the two
+               that look like they should work and do not, and the three
+               Generic spellings are the interesting ones: they read like
+               names in the table and are not. */
+            static const char *const refuses[] = {
+                "kCGColorSpaceUnnamed",
+                "kCGColorSpaceInvalid",
+                "kCGColorSpaceGenericCMYKGamma2_2",
+                "kCGColorSpaceGenericRGBGamma2_2",
+                "kCGColorSpaceGenericCMYKLinear",
+            };
+            /* Near misses around the five that work, since an exact byte
+               match has to fail all of these: wrong case, a space on either
+               side, an extra character at either end, the bare human-readable
+               name, and the empty and blank strings. */
+            static const char *const near[] = {
+                "", " ", "sRGB", "SRGB", "P3", "GenericGray", "Generic Gray",
+                "kCGColorSpaceGenericLab ", " kCGColorSpaceGenericLab",
+                "kCGColorSpaceGenericLabX", "kCGColorSpaceGenericLabs",
+                "kCGColorSpacegenericlab",
+                "kCGColorSpaceDeviceRGB ", "kCGColorSpaceDeviceGrayX",
+                "kCGColorSpacePattern", "kCGColorSpaceNonexistent",
+                "kCGColorSpacesRGB",
+            };
+            const size_t nres = sizeof resolves / sizeof resolves[0];
+            const size_t nref = sizeof refuses / sizeof refuses[0];
+            const size_t nnear = sizeof near / sizeof near[0];
+            /* What each resolving name answers, so the properties are
+               asserted rather than inferred from the name's spelling. */
+            static const struct {
+                CGColorSpaceModel model;
+                size_t ncomp;
+                int type;
+                int out;
+            } expect[] = {
+                { kCGColorSpaceModelMonochrome, 1, 0, 1 }, /* DeviceGray */
+                { kCGColorSpaceModelRGB, 3, 1, 1 },        /* DeviceRGB */
+                { kCGColorSpaceModelCMYK, 4, 2, 1 },       /* DeviceCMYK */
+                { kCGColorSpaceModelPattern, 0, 9, 0 },    /* ColoredPattern */
+                { kCGColorSpaceModelLab, 3, 5, 1 },        /* GenericLab */
+            };
+            size_t i;
+
+            /* A NULL name is refused rather than faulted. */
+            b("nm/null_name", CGColorSpaceCreateWithName(NULL) == NULL);
+
+            for (i = 0; i < nres; i++) {
+                CFStringRef s = CFStringCreateWithCString(NULL, resolves[i],
+                    kCFStringEncodingUTF8);
+                CGColorSpaceRef r = CGColorSpaceCreateWithName(s);
+
+                snprintf(l, sizeof l, "nm/%s/non_null", resolves[i]);
+                b(l, r != NULL);
+                if (r) {
+                    snprintf(l, sizeof l, "nm/%s/model", resolves[i]);
+                    b(l, CGColorSpaceGetModel(r) == expect[i].model);
+                    snprintf(l, sizeof l, "nm/%s/ncomp", resolves[i]);
+                    n(l, (long long)CGColorSpaceGetNumberOfComponents(r));
+                    snprintf(l, sizeof l, "nm/%s/type", resolves[i]);
+                    n(l, CGColorSpaceGetType(r));
+                    snprintf(l, sizeof l, "nm/%s/name", resolves[i]);
+                    cfstr(l, CGColorSpaceCopyName(r));
+                    snprintf(l, sizeof l, "nm/%s/icc", resolves[i]);
+                    icc(l, CGColorSpaceCopyICCData(r));
+                    snprintf(l, sizeof l, "nm/%s/base_is_null", resolves[i]);
+                    b(l, CGColorSpaceGetBaseColorSpace(r) == NULL);
+                    snprintf(l, sizeof l, "nm/%s/out", resolves[i]);
+                    b(l, CGColorSpaceSupportsOutput(r));
+                    /* The three device names are the singletons themselves,
+                       so a named lookup and the constructor are one object.
+                       Apple agrees: both return the same address. */
+                    snprintf(l, sizeof l, "nm/%s/stable", resolves[i]);
+                    b(l, CGColorSpaceCreateWithName(s) == r);
+                    CGColorSpaceRelease(r);
+                }
+                CFRelease(s);
+            }
+            for (i = 0; i < nref; i++) {
+                CFStringRef s = CFStringCreateWithCString(NULL, refuses[i],
+                    kCFStringEncodingUTF8);
+                snprintf(l, sizeof l, "nm/refused/%zu", i);
+                b(l, CGColorSpaceCreateWithName(s) == NULL);
+                CFRelease(s);
+            }
+            for (i = 0; i < nnear; i++) {
+                CFStringRef s = CFStringCreateWithCString(NULL, near[i],
+                    kCFStringEncodingUTF8);
+                snprintf(l, sizeof l, "nm/near/%zu", i);
+                b(l, CGColorSpaceCreateWithName(s) == NULL);
+                CFRelease(s);
+            }
+
+            /* Identity with the device constructors, which is a stronger
+               statement than "the properties match". */
+            {
+                CFStringRef g = CFStringCreateWithCString(NULL,
+                    "kCGColorSpaceDeviceGray", kCFStringEncodingUTF8);
+                CFStringRef r = CFStringCreateWithCString(NULL,
+                    "kCGColorSpaceDeviceRGB", kCFStringEncodingUTF8);
+                CFStringRef c = CFStringCreateWithCString(NULL,
+                    "kCGColorSpaceDeviceCMYK", kCFStringEncodingUTF8);
+
+                b("nm/identity/gray",
+                    CGColorSpaceCreateWithName(g) == CGColorSpaceCreateDeviceGray());
+                b("nm/identity/rgb",
+                    CGColorSpaceCreateWithName(r) == CGColorSpaceCreateDeviceRGB());
+                b("nm/identity/cmyk",
+                    CGColorSpaceCreateWithName(c) == CGColorSpaceCreateDeviceCMYK());
+                CFRelease(g);
+                CFRelease(r);
+                CFRelease(c);
+            }
+
+            /* A pattern name builds a new object on every call rather than
+               answering a singleton, so the caller owns each result and two
+               calls are not the same space. */
+            {
+                CFStringRef p = CFStringCreateWithCString(NULL,
+                    "kCGColorSpaceColoredPattern", kCFStringEncodingUTF8);
+                CGColorSpaceRef p1 = CGColorSpaceCreateWithName(p);
+                CGColorSpaceRef p2 = CGColorSpaceCreateWithName(p);
+
+                b("nm/pattern/fresh", p1 != p2);
+                b("nm/pattern/eq_across_calls",
+                    CGColorSpaceEqualToColorSpace(p1, p2));
+                if (p1)
+                    CGColorSpaceRelease(p1);
+                if (p2)
+                    CGColorSpaceRelease(p2);
+                CFRelease(p);
+            }
+
+            /* The generic Lab name resolves to the 496-byte profile
+               CreateLab already emits, and to nothing else: D65 cannot be held
+               exactly by a float, so the white point is dropped whole and the
+               profile is the same one D50 produces.  Both comparisons mask the
+               creation date, which is the only live field. */
+            {
+                static const CGFloat d65[3] = { 0.9505, 1.0, 1.089 };
+                static const CGFloat d50[3] = { 0.9642, 1.0, 0.8249 };
+                CFStringRef s = CFStringCreateWithCString(NULL,
+                    "kCGColorSpaceGenericLab", kCFStringEncodingUTF8);
+                CGColorSpaceRef named = CGColorSpaceCreateWithName(s);
+                CGColorSpaceRef l65 = CGColorSpaceCreateLab(d65, NULL, NULL);
+                CGColorSpaceRef l50 = CGColorSpaceCreateLab(d50, NULL, NULL);
+                CFDataRef a = named ? CGColorSpaceCopyICCData(named) : NULL;
+                CFDataRef b65 = l65 ? CGColorSpaceCopyICCData(l65) : NULL;
+                CFDataRef b50 = l50 ? CGColorSpaceCopyICCData(l50) : NULL;
+
+                icc_live_date("nm/lab/icc", a);
+                icc_live_date("nm/lab/icc_d65", b65);
+                icc_live_date("nm/lab/icc_d50", b50);
+                /* The named profile matches the D65-built one and not the 516 bytes
+                   a white point a float can hold produces; the two digests
+                   above are recorded separately so that shows up as data. */
+                /* Apple reports the named space and a space built from D65
+                   unequal even though the two carry the same 496 bytes: the
+                   profile cannot be what decides it, because it cannot tell
+                   them apart.  The white point can. */
+                b("nm/lab/neq_createlab_d65",
+                    named && l65
+                        && !CGColorSpaceEqualToColorSpace(named, l65));
+                if (a) CFRelease(a);
+                if (b65) CFRelease(b65);
+                if (b50) CFRelease(b50);
+                if (l65) CGColorSpaceRelease(l65);
+                if (l50) CGColorSpaceRelease(l50);
+                if (named) CGColorSpaceRelease(named);
+                CFRelease(s);
+            }
+
+            /* The lookup reads contents rather than identity, so a mutable
+               string built at runtime resolves like a constant does. */
+            {
+                CFMutableStringRef m = CFStringCreateMutable(NULL, 0);
+
+                CFStringAppend(m, CFSTR("kCGColorSpace"));
+                CFStringAppend(m, CFSTR("DeviceRGB"));
+                b("nm/mutable_resolves",
+                    CGColorSpaceCreateWithName(m) == CGColorSpaceCreateDeviceRGB());
+                CFRelease(m);
             }
         }
 

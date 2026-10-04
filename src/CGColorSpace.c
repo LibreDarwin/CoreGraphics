@@ -111,6 +111,19 @@ struct CGColorSpace {
        apart. */
     bool hasRange;
     CGFloat range[4];
+    /* A Lab space's white point as the caller gave it, and whether they gave
+       one at all.  This is kept beside the profile for the same reason the
+       range is, and it is the sharper case: Apple collapses the white point
+       when it cannot be written as s15Fixed16, so CGColorSpaceCreateLab built
+       from D65 and from D50 both produce the very same 496 bytes and are yet
+       reported unequal.  A white point that was collapsed away is still what
+       the caller asked for, and it is what tells the two apart.
+
+       The generic Lab space recorded by name records none, which is what
+       keeps it distinct from every space a caller builds -- those 496 bytes
+       are exactly what CGColorSpaceCreateLab hands out for D65. */
+    bool hasWhitePoint;
+    CGFloat whitePoint[3];
     /* Whether the space uses values outside 0..1, which is what
        CGColorSpaceUsesExtendedRange reports and what an extended space
        carries that its base does not.
@@ -147,23 +160,43 @@ struct CGColorSpace {
    is spelled with the kCGColorSpace prefix that the name itself carries,
    i.e. the device RGB space is named "kCGColorSpaceDeviceRGB", not
    "Device RGB". */
+/* The initializers are designated rather than positional: the struct carries
+   several adjacent fields that are easy to mistype in a bare list, and a
+   field added in the middle should not silently reinterpret one. */
+
 static struct CGColorSpace CGColorSpaceDeviceGrayState = {
-    0, true, kCGColorSpaceModelMonochrome, CGColorSpaceTypeMonochrome, 1,
-    "kCGColorSpaceDeviceGray", NULL, NULL, 0, false, { 0, 0, 0, 0 }, false, false,
-    NULL, 0, 0
+    .immortal = true,
+    .model = kCGColorSpaceModelMonochrome,
+    .type = CGColorSpaceTypeMonochrome,
+    .ncomp = 1,
+    .name = "kCGColorSpaceDeviceGray"
 };
 
 static struct CGColorSpace CGColorSpaceDeviceRGBState = {
-    0, true, kCGColorSpaceModelRGB, CGColorSpaceTypeRGB, 3,
-    "kCGColorSpaceDeviceRGB", NULL, NULL, 0, false, { 0, 0, 0, 0 }, false, false,
-    NULL, 0, 0
+    .immortal = true,
+    .model = kCGColorSpaceModelRGB,
+    .type = CGColorSpaceTypeRGB,
+    .ncomp = 3,
+    .name = "kCGColorSpaceDeviceRGB"
 };
 
 static struct CGColorSpace CGColorSpaceDeviceCMYKState = {
-    0, true, kCGColorSpaceModelCMYK, CGColorSpaceTypeCMYK, 4,
-    "kCGColorSpaceDeviceCMYK", NULL, NULL, 0, false, { 0, 0, 0, 0 }, false, false,
-    NULL, 0, 0
+    .immortal = true,
+    .model = kCGColorSpaceModelCMYK,
+    .type = CGColorSpaceTypeCMYK,
+    .ncomp = 4,
+    .name = "kCGColorSpaceDeviceCMYK"
 };
+
+/* The generic Lab space, built on first use and then kept.
+
+   Apple answers CGColorSpaceCreateWithName(kCGColorSpaceGenericLab) with the
+   same pointer every time, and that pointer is an immortal one -- its retain
+   count reads as the immortal marker and releasing it does nothing.  So this
+   is a cached singleton like the device spaces, and not a fresh Lab space per
+   call, even though the profile has to be assembled at runtime.  Until the
+   first call this is null. */
+static struct CGColorSpace *CGColorSpaceGenericLabState;
 
 /* The name a pattern space reports when it has no base.  A pattern space
    built on a base has no name of its own, so this is the only pattern name
@@ -274,6 +307,10 @@ static CFStringRef CGColorSpaceNameFor(struct CGColorSpace *s)
         return CFSTR("kCGColorSpaceDeviceGray");
     if (s == &CGColorSpaceDeviceCMYKState)
         return CFSTR("kCGColorSpaceDeviceCMYK");
+    /* The generic Lab space is a singleton too, so it is named by identity
+       for the same reason: its name is a constant and not a copy. */
+    if (s == CGColorSpaceGenericLabState)
+        return CFSTR("kCGColorSpaceGenericLab");
     return CFStringCreateWithCString(kCFAllocatorDefault, s->name,
         kCFStringEncodingUTF8);
 }
@@ -318,6 +355,98 @@ CGColorSpaceRef CGColorSpaceCreatePattern(CGColorSpaceRef baseSpace)
     if (base)
         CGColorSpaceRetain(baseSpace);
     return s;
+}
+
+/* Create a color space from one of its name constants.
+
+   The lookup is an exact byte compare of the UTF-8 contents -- the same
+   comparison CGColorSpaceIDFromName does, and for the same reason: going
+   through CFStringCompare would be a locale-sensitive Unicode collation and
+   so would accept spellings Apple's exact match refuses.  What is read is the
+   contents and not the CFString's identity, which is observable: a mutable
+   CFString holding "kCGColorSpaceDeviceRGB" resolves to device RGB just as an
+   immutable constant does.
+
+   A NULL name and the empty string both return NULL rather than faulting.
+
+   Five of the forty-five name constants resolve here.  The identifier table is
+   not the set of names this accepts and is not even most of it: sweeping every
+   constant reachable through the API gives 45 distinct names, of which the
+   table's 32 all resolve, eight more resolve with no identifier at all, and
+   five return NULL (Unnamed, Invalid, and the three legacy GenericGamma2_2 /
+   GenericCMYKLinear spellings).  Those eight are the three device names, the
+   four generic profiles the table omits, and ColoredPattern -- so a lookup
+   built from the identifier table alone would refuse eight names Apple
+   accepts, among them kCGColorSpaceGenericGray, which reads as identifier 0
+   and so is indistinguishable from a name Apple has never heard of.
+
+   The three device names resolve to the file-scope singletons, so the named
+   space and the CreateDeviceX() space are one object: both return the same
+   address, and two named calls do too. */
+
+CGColorSpaceRef CGColorSpaceCreateWithName(CFStringRef name)
+{
+    /* Ordering is not observable here -- no two of these names are prefixes of
+       each other, and the compare is exact -- so the device names come first
+       only because they are the cheapest to answer. */
+    if (CGColorSpaceNameEqualsASCII(name, "kCGColorSpaceDeviceGray"))
+        return &CGColorSpaceDeviceGrayState;
+    if (CGColorSpaceNameEqualsASCII(name, "kCGColorSpaceDeviceRGB"))
+        return &CGColorSpaceDeviceRGBState;
+    if (CGColorSpaceNameEqualsASCII(name, "kCGColorSpaceDeviceCMYK"))
+        return &CGColorSpaceDeviceCMYKState;
+
+    /* A pattern space is the one named space that is built rather than
+       resolved, and every call builds a fresh one: two calls return different
+       addresses at reference count 1, so the caller owns the result.  It is
+       also not the object CGColorSpaceCreatePattern(NULL) returns -- different
+       address again -- though the two agree on every observable: model 6, zero
+       components, type 9, no base, no ICC data, no output support, and the
+       name kCGColorSpaceColoredPattern.  Building it the same way is right
+       because there is nothing left to distinguish. */
+    if (CGColorSpaceNameEqualsASCII(name, CG_PATTERN_NAME_WITHOUT_BASE))
+        return CGColorSpaceCreatePattern(NULL);
+
+    /* GenericLab is the one named space whose profile this step can already
+       produce, and it does so through CreateLab rather than through any new
+       code: any white point a float cannot hold exactly produces the same
+       496-byte profile, with the whole wtpt tag dropped rather than rounded,
+       so D65 and D50 land on identical bytes.  Both were compared against the
+       space the name resolves to and neither differs in a byte.
+
+       Apple hands back a singleton, so the space is built once and kept.  Two
+       further details come with that.  It is immortal, like the device spaces:
+       its retain count reads as the immortal marker and releasing it is a
+       no-op.  And it records no white point, which is what makes it unequal to
+       every Lab space a caller builds -- the profile it carries is exactly the
+       one CreateLab produces for D65, and Apple still calls the two different,
+       so the white point the caller supplied has to be distinguished from the
+       one this space does not have. */
+    if (CGColorSpaceNameEqualsASCII(name, "kCGColorSpaceGenericLab")) {
+        static const CGFloat d65[3] = { 0.9505, 1.0, 1.089 };
+        struct CGColorSpace *s;
+
+        if (CGColorSpaceGenericLabState)
+            return CGColorSpaceGenericLabState;
+        s = CGColorSpaceCreateLab(d65, NULL, NULL);
+        if (!s)
+            return NULL;
+        s->hasWhitePoint = false;
+        s->immortal = true;
+        /* CreateLab leaves the space unnamed, since a space named for its
+           white point has no business carrying a name, so the name is attached
+           here.  It is a literal like the device spaces' rather than a copy,
+           and the name field is not owned. */
+        s->name = "kCGColorSpaceGenericLab";
+        CGColorSpaceGenericLabState = s;
+        return s;
+    }
+
+    /* The remaining 36 names resolve to spaces carrying embedded profiles that
+       this step cannot emit yet.  Returning NULL is a visible difference from
+       Apple rather than a deferral that hides: it is why GenericLab and the
+       device names are the whole of what works so far. */
+    return NULL;
 }
 
 /* Create an indexed color space.  `lastIndex' names the largest valid index,
@@ -1248,6 +1377,13 @@ CGColorSpaceRef CGColorSpaceCreateLab(const CGFloat
         return NULL;
     if (!blackPoint)
         blackPoint = zero;
+
+    /* The white point the caller asked for is kept even where the profile had
+       to collapse it, because that is what Apple compares: two Lab spaces can
+       carry the same 496 bytes and still be unequal because the points differ.
+       Taken here, before lab_xyz has had a chance to reject the values. */
+    s->hasWhitePoint = true;
+    memcpy(s->whitePoint, whitePoint, sizeof s->whitePoint);
 
     lab_xyz(xyz[0], whitePoint);
     lab_xyz(xyz[1], blackPoint);
@@ -2336,7 +2472,12 @@ bool CGColorSpaceEqualToColorSpace(CGColorSpaceRef space1,
 
        A Lab space also carries a range that the profile does not describe,
        so it has to be compared too, or two spaces Apple calls different would
-       look identical here.
+       look identical here.  Its white point is in the same position, and is
+       the clearer case: a white point too fine for s15Fixed16 is dropped from
+       the profile altogether, so D65 and D50 produce the very same 496 bytes
+       and are still unequal.  The generic Lab space recorded by name carries
+       that same profile with no white point behind it, which is what keeps it
+       from being equal to either of them.
 
        The same is true of an extended space, and it is the sharper case: an
        extended space's profile is its base's byte for byte, so comparing
@@ -2354,6 +2495,12 @@ bool CGColorSpaceEqualToColorSpace(CGColorSpaceRef space1,
         if (a->hasRange != b->hasRange)
             return false;
         if (a->hasRange && memcmp(a->range, b->range, sizeof a->range) != 0)
+            return false;
+        if (a->hasWhitePoint != b->hasWhitePoint)
+            return false;
+        if (a->hasWhitePoint
+            && memcmp(a->whitePoint, b->whitePoint,
+                sizeof a->whitePoint) != 0)
             return false;
         if (a->extended != b->extended || a->linearized != b->linearized)
             return false;

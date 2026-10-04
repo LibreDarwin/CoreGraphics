@@ -25,9 +25,8 @@
      - CreateLinearized, CreateExtended and their Extended variants,
      - CreateICCBased, CreateWithICCData, CreateWithICCProfile,
        CreateWithColorSyncProfile, CreateWithURL, CreatePlatformProfile,
-     - CreateWithName and CreateWithID for the 32 built-in non-device names,
-       which resolve to the embedded profiles,
-     - CreateIndexed, which for a 256-entry table returns NULL in Apple.
+     - CreateWithID, and CreateWithName for all but five names, since the rest
+       resolve to embedded profiles.
 
    The three calibrated spaces do synthesise a profile, and the size varies
    with the shape of the request: 380 bytes for a calibrated gray, 416 to 528
@@ -88,6 +87,36 @@ CG_EXTERN CGColorSpaceRef CGColorSpaceCreateDeviceCMYK(void);
    non-NULL `baseSpace' must be released by the caller. */
 CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
     CGColorSpaceRef __nullable baseSpace);
+
+/* Create a color space from one of its name constants, such as
+   kCGColorSpaceSRGB or kCGColorSpaceDeviceRGB.  A NULL name, and the empty
+   string, yield NULL.
+
+   The match is an exact byte comparison of the name's UTF-8 contents: "sRGB",
+   "CGColorSpace sRGB", "P3" and "kCGColorSpaceSRGB " are all rejected, as are
+   the wrong case and any trailing text.  A mutable CFString resolves on its
+   contents exactly as an immutable constant does.
+
+   Five names resolve in this step -- the three device names,
+   kCGColorSpaceColoredPattern and kCGColorSpaceGenericLab.  The rest yield
+   NULL, because they resolve to spaces carrying embedded profiles this step
+   cannot emit yet.  That set is neither the identifier table nor a subset of
+   it: of the 45 name constants reachable through the API, 40 resolve and 5
+   return NULL, and eight of the resolving names are absent from the table that
+   CGColorSpaceIDFromName and CGColorSpaceNameFromID use.  So this accepts
+   names that have no identifier, and refuses names that do.
+
+   The three device names answer the process-lifetime singletons, identical to
+   what CGColorSpaceCreateDeviceGray, ...DeviceRGB and ...DeviceCMYK return.
+   kCGColorSpaceColoredPattern builds a fresh reference-counted pattern space
+   with no base on every call.  kCGColorSpaceGenericLab is also a singleton,
+   built on first use and immortal like the device spaces, and its profile is
+   byte-for-byte what CGColorSpaceCreateLab with a D65 or D50 white point
+   produces.  Every other name returns NULL for now; the remaining ones
+   resolve to embedded profiles, which the rest of this file's constructors do
+   not yet assemble. */
+CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateWithName(
+    CFStringRef __nullable name);
 
 /* Create an indexed color space from a lookup table.  `lastIndex' is the
    largest valid index and must be at most 255; `colorTable' is an array of
@@ -164,6 +193,13 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateCalibratedRGB(const CGFlo
    (0.5, 1, 1) survives and the profile grows to 516 bytes to give the black
    point a block of its own.  `range' is accepted and has no effect on the
    profile at all.
+
+   The white point is kept even when the profile had to collapse it, because
+   CGColorSpaceEqualToColorSpace compares it: two Lab spaces built from D65 and
+   from D50 share the same 496 bytes and are still unequal.  The space
+   CGColorSpaceCreateWithName reports for kCGColorSpaceGenericLab records no
+   white point, which is what keeps it unequal to both of them even though it
+   carries D65's profile.
 
    A NULL `whitePoint' is rejected and the function returns NULL; Apple faults
    on that instead, so there is no behaviour to copy. */
