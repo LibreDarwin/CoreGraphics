@@ -429,7 +429,7 @@ CGColorSpaceRef CGColorSpaceCreatePattern(CGColorSpaceRef baseSpace)
 
    A NULL name and the empty string both return NULL rather than faulting.
 
-   Thirty-four of the fifty name constants resolve here, where Apple resolves
+   Thirty-five of the fifty name constants resolve here, where Apple resolves
    forty-four.  The identifier table is not the set of names this accepts and is
    not even most of it: sweeping every constant reachable through the API gives
    50 distinct names, of which Apple's 44 resolve and six return NULL.  Of those
@@ -442,7 +442,7 @@ CGColorSpaceRef CGColorSpaceCreatePattern(CGColorSpaceRef baseSpace)
    ColoredPattern -- so a lookup built from the identifier table alone would
    refuse eight names Apple accepts, among them kCGColorSpaceGenericGray, which
    reads as identifier 0 and so is indistinguishable from a name Apple has never
-   heard of.  The ten names this step still refuses are the ones carrying a
+   heard of.  The nine names this step still refuses are the ones carrying a
    profile it cannot emit yet.
 
    The three device names resolve to the file-scope singletons, so the named
@@ -507,11 +507,11 @@ CGColorSpaceRef CGColorSpaceCreateWithName(CFStringRef name)
         return s;
     }
 
-    /* Sixteen of the remaining names resolve to the eleven profiles that share
-       the v4 template, and CGColorSpaceCreateNamedRGBV4 answers for exactly
-       those sixteen -- including the three extended-range aliases, which take
-       the same profile bytes as their base and differ only in the name they
-       report and the extended flag they carry. */
+    /* Eighteen of the remaining names resolve to the thirteen profiles that
+       share the RGB template, and CGColorSpaceCreateNamedRGBV4 answers for
+       exactly those eighteen -- including the three extended-range aliases,
+       which take the same profile bytes as their base and differ only in the
+       name they report and the extended flag they carry. */
     {
         CGColorSpaceRef gray = CGColorSpaceCreateNamedGrayV2(name);
         CGColorSpaceRef hdr;
@@ -1087,7 +1087,7 @@ static void put_xyz_i32(unsigned char *p, const int32_t v[3])
     put_be32(p + 16, v[2]);
 }
 
-/* The ten-tag v4 matrix/TRC template.
+/* The RGB matrix/TRC template.
 
    Eight of the named RGB spaces resolve to profiles of one shape: a v4 header,
    ten tags and nothing else.  They are Display P3, the two ITU-R spaces, the
@@ -1119,7 +1119,7 @@ enum {
        and both constant tags. */
     CGICCRGBV4FixedTags = 6,    /* desc, cprt, wtpt, rXYZ, gXYZ, bXYZ */
     CGICCRGBV4CurveTags = 3,    /* rTRC, gTRC, bTRC, all sharing one block */
-    /* Two constant tags is what the seventeen profiles below need between them
+    /* Two constant tags is what the eighteen profiles below need between them
        -- CoreMedia709 carries both, every other space neither -- so two is the
        most the template allows rather than an arbitrary bound. */
     CGICCRGBV4MaxExtraTags = 2,
@@ -1164,9 +1164,10 @@ struct cgs_rgb_v4 {
     const char *desc;
     const char *cprt;
     /* The profile version, as the four-byte field the header carries.  Sixteen
-       of the seventeen rows are v4 and leave this zero; CoreMedia709 is v2.1
-       and says so here.  A v2.1 profile is the reason that one carries the
-       legacy string types below, so the two facts belong together. */
+       of the eighteen rows are v4 and leave this zero; CoreMedia709 and
+       GenericRGBLinear are v2.1 and say so here.  A v2.1 profile is the reason
+       those two carry the legacy string types below, so the facts belong
+       together. */
     int32_t version;
     /* Whether the strings are the v2 forms -- a legacy 'desc' and 'text' -- or
        the 'mluc' records the rest of the template uses. */
@@ -1176,6 +1177,12 @@ struct cgs_rgb_v4 {
     int32_t colorants[9];
     struct cgs_icc_curve trc;
     int32_t chad[9];
+    /* Whether to leave 'chad' out entirely.  Seventeen of the spaces carry it
+       and one does not, so this is spelled as the exception and defaults to
+       emitting it: a row that forgets says so in the bytes rather than losing
+       a tag quietly, which is the same reason the version above is a row's to
+       give with zero meaning the common v4. */
+    int omitChad;
     int trcOwner;
     /* Whether the profile carries a 'cicp' tag and a profile ID, which the
        two groups differ on together: a linearized space has both, and the
@@ -1339,10 +1346,10 @@ static void put_icc_header(unsigned char *p, size_t len, const int created[6],
     memcpy(p + 80, "appl", 4);
 }
 
-/* The header for an RGB space on this template.  Sixteen of the seventeen
-   profiles are v4, and CoreMedia709 is v2.1 -- which is why it carries the
-   legacy string types, and is the reason the version is a row's to give rather
-   than a constant here. */
+/* The header for an RGB space on this template.  Sixteen of the eighteen
+   profiles are v4, and CoreMedia709 and GenericRGBLinear are v2.1 -- which is
+   why they carry the legacy string types, and is the reason the version is a
+   row's to give rather than a constant here. */
 static void put_rgb_v4_header(unsigned char *p, size_t len, const int created[6],
     int32_t version)
 {
@@ -1404,8 +1411,10 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
         name[n] = v->extraName[i];
         block[n++] = extra + i;
     }
-    name[n] = "chad";
-    block[n++] = chad;
+    if (!v->omitChad) {
+        name[n] = "chad";
+        block[n++] = chad;
+    }
     if (v->cicp) {
         name[n] = "cicp";
         block[n++] = cicp;
@@ -1452,14 +1461,23 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
         tagOff[extra + i] = (int32_t)icc_pad(len);
         len = icc_pad(len) + v->extraLen[i];
     }
-    tagLen[chad] = CGICCRGBV4ChadLength;
-    tagOff[chad] = (int32_t)icc_pad(len);
-    len = icc_pad(len) + CGICCRGBV4ChadLength;
+    if (!v->omitChad) {
+        tagLen[chad] = CGICCRGBV4ChadLength;
+        tagOff[chad] = (int32_t)icc_pad(len);
+        len = icc_pad(len) + CGICCRGBV4ChadLength;
+    }
     if (v->cicp) {
         tagLen[cicp] = CGICCRGBV4CicpLength;
         tagOff[cicp] = (int32_t)icc_pad(len);
         len = icc_pad(len) + CGICCRGBV4CicpLength;
     }
+
+    /* The profile is padded out to a four-byte boundary.  Every block after
+       the first already is, so this has gone unnoticed until a profile whose
+       last block ended a byte or two short of one came along -- the recorded
+       size is the padded length, so it has to happen before the header is
+       written. */
+    len = icc_pad(len);
 
     p = calloc(1, len);
     if (!p)
@@ -1489,7 +1507,8 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
     put_icc_curve(p + tagOff[curve], &v->trc);
     for (i = 0; i < v->extraCount; i++)
         memcpy(p + tagOff[extra + i], v->extraData[i], v->extraLen[i]);
-    put_chad(p + tagOff[chad], v->chad);
+    if (!v->omitChad)
+        put_chad(p + tagOff[chad], v->chad);
     if (v->cicp)
         put_cicp(p + tagOff[cicp], v->cicpValue);
     if (v->profileId)
@@ -1677,12 +1696,12 @@ static const unsigned char CoreMedia709NDIN[62] = {
     0x00, 0x00,
 };
 
-/* CoreMedia709 is the seventeenth profile on this template, and the only one
-   that is not a v4 profile: its header declares v2.1, which is why it carries
-   the legacy 'desc' and 'text' strings rather than 'mluc', and it is the only
-   one with two tags in the middle of the table.  Its white point is not
-   quantised to the value the other sixteen share, and its copyright is the
-   only one that is not a template sentence with a year in it.
+/* CoreMedia709 is the seventeenth profile on this template, and one of two that
+   are not v4: its header declares v2.1, which is why it carries the legacy
+   'desc' and 'text' strings rather than 'mluc', and it is the only one with two
+   tags in the middle of the table.  Its white point is not quantised to the
+   value the others share, and its copyright is the one of the eighteen that
+   does not follow the 'Copyright Apple Inc., <year>' form.
 
    What it does share is worth as much: the BT.709 colorants to the last bit,
    the Bradford inverse, and a header illuminant equal to the D50 the rest use.
@@ -1705,16 +1724,50 @@ static const struct cgs_rgb_v4 CoreMedia709 = {
     .extraCount = 2,
 };
 
-/* The seventeen names those eleven profiles answer to, and the space each one
+/* GenericRGBLinear is the eighteenth profile on this template and the second of
+   the two that are not v4, so it shares CoreMedia709's legacy string types
+   rather than the v4 'mluc' records, and it is the only profile here carrying
+   no 'chad' at all -- nine tags where CoreMedia709 has twelve.  Its creation
+   date is the most recent of any profile in this file, 2025 against the 2023 of
+   the BT.2020 space next door, and its copyright follows the
+   'Copyright Apple Inc., <year>' form every profile but CoreMedia709 uses.
+
+   The name is the interesting part.  Its tone curve is a u8Fixed8 gamma of
+   256/256 -- the identity, written out as a gamma rather than left as the
+   zero-count form the same identity could take -- so the space really is
+   linear, and needs no 'cicp' tag to say what the three linearized spaces say
+   with one.  What distinguishes it from kCGColorSpaceGenericRGB is therefore
+   its colorants rather than its transfer function.  Those are close to the
+   other space's and not the same: red moves 0x3dee to 0x3e1b and green 0xac73
+   to 0xaca5, so the linear space is the more saturated of the two by a little,
+   which is not the direction the name alone would suggest -- and which is still
+   not far enough for Apple to call either of them wide gamut.
+
+   Its white point is the header illuminant itself, one of two values the
+   template uses, where CoreMedia709's is quantised somewhere else entirely.
+   All three tone curves share one block. */
+static const struct cgs_rgb_v4 GenericRGBLinear = {
+    .desc = "Generic RGB Linear Profile",
+    .version = CGICCVersionV21,
+    .legacyStrings = 1,
+    .created = { 2025, 1, 1, 0, 0, 0 },
+    .cprt = "Copyright Apple Inc., 2025",
+    .wtpt = { 0xf6d6, 0x10000, 0xd32d },
+    .colorants = { 0x744d, 0x3e1b, 0x3ca, 0x5a72, 0xaca5, 0x1724, 0x2817, 0x155a, 0xb831 },
+    .trc = { 0, 0, 256, 0, { 0x0 } },  /* u8Fixed8 gamma of 1.0, the identity */
+    .omitChad = 1,
+};
+
+/* The eighteen names those thirteen profiles answer to, and the space each one
    builds.  An extended-range name takes the same profile bytes as its base --
    the profile carries no range, and the two spaces are reported unequal
    because the flag below is what differs -- so it is the name and the flag that
    are per-space rather than the profile.
 
-   Every one of the seventeen is an immortal singleton: two calls answer the same
+   Every one of the eighteen is an immortal singleton: two calls answer the same
    pointer at the immortal retain count, exactly as the device names do.  So
    each row is built on first use and then kept. */
-enum { CGColorSpaceNamedRGBV4Count = 17 };
+enum { CGColorSpaceNamedRGBV4Count = 18 };
 
 static const struct {
     const char *name;
@@ -1732,6 +1785,7 @@ static const struct {
     { "kCGColorSpaceDCIP3", &DCIP3, false },
     { "kCGColorSpaceACESCGLinear", &ACESCGLinear, false },
     { "kCGColorSpaceCoreMedia709", &CoreMedia709, false },
+    { "kCGColorSpaceGenericRGBLinear", &GenericRGBLinear, false },
     { "kCGColorSpaceLinearSRGB", &LinearSRGB, false },
     { "kCGColorSpaceExtendedLinearSRGB", &LinearSRGB, true },
     { "kCGColorSpaceLinearDisplayP3", &LinearDisplayP3, false },

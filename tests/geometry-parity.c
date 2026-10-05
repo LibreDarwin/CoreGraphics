@@ -2786,10 +2786,10 @@ int main(void)
                    the extended name takes the same 356 bytes as its base. */
                 "kCGColorSpaceLinearGray",
                 "kCGColorSpaceExtendedLinearGray",
-                /* The twelve v4-template profiles, which between them carry seventeen
-                   names: the three extended-range aliases take the same
-                   profile bytes as their base and differ only in the name and
-                   the extended flag. */
+                /* Twelve of the template's thirteen profiles, which between
+                   them carry seventeen names: the three extended-range aliases
+                   take the same profile bytes as their base and differ only in
+                   the name and the extended flag. */
                 "kCGColorSpaceDisplayP3",
                 "kCGColorSpaceExtendedDisplayP3",
                 "kCGColorSpaceITUR_709",
@@ -2800,13 +2800,13 @@ int main(void)
                 "kCGColorSpaceROMMRGB",
                 "kCGColorSpaceDCIP3",
                 "kCGColorSpaceACESCGLinear",
-                /* The seventeenth v4-template profile, and the only one of
-                   them that is not a v4 profile: its header declares v2.1, so
-                   it carries the legacy 'desc' and 'text' strings, two tags of
-                   its own in the middle of the table, and a white point that is
-                   not the quantised one the other sixteen share.  It reports
-                   the same type as they do, which is worth having in the table
-                   since nothing about the header would suggest it. */
+                /* The seventeenth template profile, and one of two that are
+                   not v4: its header declares v2.1, so it carries the legacy
+                   'desc' and 'text' strings, two tags of its own in the middle
+                   of the table, and a white point that is not the quantised one
+                   the others share.  It reports the same type as the v4
+                   profiles do, which is worth having in the table since nothing
+                   about the header would suggest it. */
                 "kCGColorSpaceCoreMedia709",
                 /* The linearized three, which differ from their gamma
                    counterparts in carrying a 'cicp' tag and a profile ID
@@ -2817,6 +2817,13 @@ int main(void)
                 "kCGColorSpaceExtendedLinearDisplayP3",
                 "kCGColorSpaceLinearITUR_2020",
                 "kCGColorSpaceExtendedLinearITUR_2020",
+                /* And one more named RGB profile, on the v2.1 legacy-string
+                   form rather than the v4 one.  It carries no 'cicp' despite
+                   the name -- its curve is a gamma of 1.0 written out rather
+                   than the zero-count identity -- and it is the only profile
+                   here carrying no 'chad' at all, so nine tags where the rest
+                   have ten to twelve. */
+                "kCGColorSpaceGenericRGBLinear",
                 /* The six HDR profiles, which between them carry eight names:
                    the PQ and HLG variants of the Display P3, 709 and 2020
                    primaries.  None of the eight carries the extended flag,
@@ -2928,6 +2935,12 @@ int main(void)
                 { kCGColorSpaceModelRGB, 3, 6, 1, 1, 1 },        /* Extended Linear Display P3 */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* Linear ITUR_2020 */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 1, 1 },        /* Extended Linear ITUR_2020 */
+                /* The same type as every other named RGB profile even though
+                   its header is v2.1, and not wide gamut.  The colorants are a
+                   shade more saturated than the gamma space of the same name's
+                   and still short of wide, which the recorded row makes
+                   explicit rather than leaving to be inferred. */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 0 },        /* GenericRGBLinear */
                 /* The six HDR spaces, one row per profile.  Each is a three-
                    component ICC space of the same type as the v4 ones, none is
                    extended, and the wide answer follows the primaries rather

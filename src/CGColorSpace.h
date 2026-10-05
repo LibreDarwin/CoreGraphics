@@ -25,7 +25,7 @@
      - CreateLinearized, CreateExtended and their Extended variants,
      - CreateICCBased, CreateWithICCData, CreateWithICCProfile,
        CreateWithColorSyncProfile, CreateWithURL, CreatePlatformProfile,
-     - CreateWithID, and CreateWithName for all but seventeen names, since
+     - CreateWithID, and CreateWithName for all but eighteen names, since
        the rest resolve to embedded profiles.
 
    The three calibrated spaces do synthesise a profile, and the size varies
@@ -116,24 +116,34 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
    byte-for-byte what CGColorSpaceCreateLab with a D65 or D50 white point
    produces.
 
-   Seventeen more names resolve to the twelve profiles that share one
+   Eighteen more names resolve to the thirteen profiles that share one
    template: Display P3, the two ITU-R spaces, BT.2020 with an sRGB gamma,
    the Display P3 space with a 709 OETF, ROMM RGB, DCI P3, ACES CG Linear,
-   kCGColorSpaceCoreMedia709, plus the three linearized spaces.  Their
-   profiles are synthesised from a table of recovered constants rather than
-   computed, and each is byte-for-byte what Apple hands back -- 536 to 660
-   bytes depending on the space.
+   kCGColorSpaceCoreMedia709, kCGColorSpaceGenericRGBLinear, plus the three
+   linearized spaces.  Their profiles are synthesised from a table of recovered
+   constants rather than computed, and each is byte-for-byte what Apple hands
+   back -- 492 to 660 bytes depending on the space.
 
    CoreMedia709 is built from that template too but is not a v4 profile: its
    header declares v2.1, and the differences that follow are visible in the
    bytes.  It carries the legacy 'desc' and 'text' strings where the others
    carry 'mluc' records, a white point that is not the quantised one the
-   other eleven share, two tags of its own -- 'vcgt' and 'ndin' -- between
+   other seventeen share, two tags of its own -- 'vcgt' and 'ndin' -- between
    the first tone curve and the Bradford inverse, and so twelve tags where
-   the rest carry ten or eleven.  It reports the same type as the v4
+   the rest carry nine to eleven.  It reports the same type as the v4
    profiles anyway, so nothing about it is visible without reading the
    header.  Its 660 bytes are the largest of the group, and it is not wide
    gamut because its primaries are BT.709's.
+
+   kCGColorSpaceGenericRGBLinear is on the same template but is the only
+   profile in the group with no 'chad' at all, which is what makes it nine
+   tags where the rest have ten to twelve.  Its header is v2.1 as
+   CoreMedia709's is, so it carries the legacy strings as well, and its tone
+   curve is a gamma of 1.0 written out as a number where the linearized spaces
+   put the zero-count identity -- which is why it needs no 'cicp' tag to say
+   what those three say with one.  It is not wide gamut, and neither is
+   kCGColorSpaceGenericRGB whose colorants it very nearly shares -- a shade
+   more saturated, which is still short of what Apple calls wide.
 
    Ten further names resolve to six HDR profiles: the PQ and HLG variants of
    the Display P3, Rec. ITU-R BT.709-5 and BT.2100 primaries, from 7,156 to
@@ -158,7 +168,7 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
    gamma spaces of the same primaries: the BT.2100 and Display P3 HDR spaces
    are wide gamut and the BT.709 ones are not.
 
-   Four details of those seventeen are worth knowing.  Each is an immortal
+   Four details of those eighteen are worth knowing.  Each is an immortal
    singleton, like the device spaces.  kCGColorSpaceExtendedDisplayP3,
    kCGColorSpaceExtendedITUR_2020 and the three extended linear names take the
    same profile bytes as their base and are told apart only by the
