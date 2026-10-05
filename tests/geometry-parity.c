@@ -2781,11 +2781,14 @@ int main(void)
                 "kCGColorSpaceDeviceCMYK",
                 "kCGColorSpaceColoredPattern",
                 "kCGColorSpaceGenericLab",
-                /* The one v2.1 profile, carrying two names: it is a gray
-                   space and so reports one component and no primaries, and
-                   the extended name takes the same 356 bytes as its base. */
+                /* The two profiles this template builds, carrying three names:
+                   the linear one is a gray space and so reports one component
+                   and no primaries, its extended name takes the same 356 bytes
+                   as its base, and the generic one is the 2,020-byte v2.2
+                   profile with the same one-component, no-primaries answer. */
                 "kCGColorSpaceLinearGray",
                 "kCGColorSpaceExtendedLinearGray",
+                "kCGColorSpaceGenericGray",
                 /* Twelve of the template's thirteen profiles, which between
                    them carry seventeen names: the three extended-range aliases
                    take the same profile bytes as their base and differ only in
@@ -2869,7 +2872,7 @@ int main(void)
                    name, the identifier is 0, and the lookup still refuses it.
                    That makes it the one name a lookup built off the
                    identifier table gets wrong for a different reason than the
-                   other seven -- it looks like a known id rather than an
+                   other six -- it looks like a known id rather than an
                    unknown one. */
                 "kCGColorSpacePattern",
                 "kCGColorSpaceUnnamed",
@@ -2925,6 +2928,15 @@ int main(void)
                 { kCGColorSpaceModelLab, 3, 5, 1, 0, 0 },        /* GenericLab */
                 { kCGColorSpaceModelMonochrome, 1, 6, 1, 0, 0 }, /* LinearGray */
                 { kCGColorSpaceModelMonochrome, 1, 6, 1, 1, 0 }, /* Extended LinearGray */
+                /* The generic gray space is the other profile on the gray
+                   template and the second-largest in the set, its 'dscm'
+                   translation list accounting for most of its 2,020 bytes.  It
+                   reports the same one-component, no-primaries answer as the
+                   linear one, is not extended, and its header being v2.2 makes
+                   no difference to what is reported -- the type is six, ICC,
+                   exactly as CoreMedia709 reports the same type as the v4 RGB
+                   profiles around it despite its own v2.1 header. */
+                { kCGColorSpaceModelMonochrome, 1, 6, 1, 0, 0 }, /* GenericGray */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* DisplayP3 */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 1, 1 },        /* Extended DisplayP3 */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 0 },        /* ITUR_709 */

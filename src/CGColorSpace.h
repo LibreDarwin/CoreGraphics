@@ -25,7 +25,7 @@
      - CreateLinearized, CreateExtended and their Extended variants,
      - CreateICCBased, CreateWithICCData, CreateWithICCProfile,
        CreateWithColorSyncProfile, CreateWithURL, CreatePlatformProfile,
-     - CreateWithID, and CreateWithName for all but nineteen names, since
+     - CreateWithID, and CreateWithName for all but eighteen names, since
        the rest resolve to embedded profiles.
 
    The three calibrated spaces do synthesise a profile, and the size varies
@@ -203,7 +203,7 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
    extended range and is nevertheless not wide gamut, so letting the flag stand
    on its own would call it one.
 
-   Two more resolve to a profile of quite another shape:
+   Three resolve to a profile of quite another shape:
    kCGColorSpaceLinearGray and kCGColorSpaceExtendedLinearGray share a single
    356-byte v2.1 profile, which is a monochrome/TRC one rather than a
    colorimetric RGB: four tags instead of ten or eleven, a legacy 'desc' and
@@ -215,7 +215,14 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
    be wider than anything.  It is not the device gray either: the profile is
    what distinguishes them.
 
-   Every other name returns NULL for now; the remaining sixteen resolve to
+   kCGColorSpaceGenericGray builds a second gray profile, 2,020 bytes and v2.2
+   where the linear one is v2.1.  It is the same kind of profile -- five tags
+   rather than four, one tone curve, no colorants -- and adds a 31-entry 'dscm'
+   translation list after the description, which accounts for most of the extra
+   size.  It reports one component and no primaries and is not wide gamut, like
+   the other gray profiles.
+
+   Every other name returns NULL for now; the remaining fifteen resolve to
    embedded profiles, which the rest of this file's constructors do not yet
    assemble. */
 CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateWithName(

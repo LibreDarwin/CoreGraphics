@@ -438,11 +438,11 @@ CGColorSpaceRef CGColorSpaceCreatePattern(CGColorSpaceRef baseSpace)
    through a sibling -- the 2020 PQ and HLG names, and the two EOTF names.  The
    six that return NULL are Pattern, Unnamed, Invalid, and the three legacy
    GenericGamma2_2 / GenericCMYKLinear spellings.  The eight with no identifier
-   are the three device names, the four generic profiles the table omits, and
-   ColoredPattern -- so a lookup built from the identifier table alone would
-   refuse eight names Apple accepts, among them kCGColorSpaceGenericGray, which
+   are the three device names, the three generic profiles the table still omits,
+   and ColoredPattern -- so a lookup built from the identifier table alone would
+   refuse seven names Apple accepts, among them kCGColorSpaceGenericXYZ, which
    reads as identifier 0 and so is indistinguishable from a name Apple has never
-   heard of.  The eight names this step still refuses are the ones carrying a
+   heard of.  The seven names this step still refuses are the ones carrying a
    profile it cannot emit yet.
 
    The three device names resolve to the file-scope singletons, so the named
@@ -516,9 +516,10 @@ CGColorSpaceRef CGColorSpaceCreateWithName(CFStringRef name)
         CGColorSpaceRef gray = CGColorSpaceCreateNamedGrayV2(name);
         CGColorSpaceRef hdr;
 
-        /* Two more are gray rather than RGB, so they get their own v2.1
-           template, and the extended one is an alias of the other in the same
-           way.  Asked first because it is the shortest list of the three. */
+        /* Three more are gray rather than RGB, so they get their own template,
+           which holds two profiles: the linear v2.1 one carrying two names,
+           the second an alias of the first, and the generic v2.2 one.  Asked
+           first because it is the shortest list of the three. */
         if (gray)
             return gray;
         /* Six more are HDR, in the PQ and HLG variants of the Display P3, 709
@@ -528,7 +529,7 @@ CGColorSpaceRef CGColorSpaceCreateWithName(CFStringRef name)
             return hdr;
     }
 
-    /* The names no template owns fall through to the same NULL the other 14
+    /* The names no template owns fall through to the same NULL the other seven
        produce, of which five are names Apple refuses too. */
     return CGColorSpaceCreateNamedRGBV4(name);
 }
@@ -1402,13 +1403,24 @@ static size_t put_mluc(unsigned char *p, const char *utf8)
    the two a tag is shows in which array the row filled.  Returns the length,
    and writes nothing at all when p is null, for the reason put_mluc_records
    gives. */
-static size_t put_extra_tag(unsigned char *p, const struct cgs_rgb_v4 *v, int i)
+static size_t put_extra_tag(unsigned char *p,
+    const unsigned char *const *extraData, const struct cgs_mluc_record *const
+    *extraRecords, const int32_t *extraLen, const int *extraRecordCount, int i)
 {
-    if (v->extraRecords[i])
-        return put_mluc_records(p, v->extraRecords[i], v->extraRecordCount[i]);
+    if (extraRecords[i])
+        return put_mluc_records(p, extraRecords[i], extraRecordCount[i]);
     if (p)
-        memcpy(p, v->extraData[i], (size_t)v->extraLen[i]);
-    return (size_t)v->extraLen[i];
+        memcpy(p, extraData[i], (size_t)extraLen[i]);
+    return (size_t)extraLen[i];
+}
+
+/* The same for one of the RGB rows, where the three arrays hang off the row
+   itself and there is nothing to unpack. */
+static size_t put_rgb_v4_extra(unsigned char *p, const struct cgs_rgb_v4 *v,
+    int i)
+{
+    return put_extra_tag(p, v->extraData, v->extraRecords, v->extraLen,
+        v->extraRecordCount, i);
 }
 
 /* 'text', the tag the copyright uses in a v2 profile where the v4 template
@@ -1441,7 +1453,8 @@ static size_t put_text(unsigned char *p, const char *ascii)
    count sits in front of the description rather than only after it.  The count
    includes the terminator, as the ASCII count above does, and the description
    is still padded out to sixty-seven. */
-static size_t put_desc(unsigned char *p, const char *ascii, int scriptCode)
+static size_t put_desc(unsigned char *p, const char *ascii, int scriptCode,
+    size_t blockLen)
 {
     size_t n = strlen(ascii);
     unsigned char *q = p + 12 + n + 1;
@@ -1461,8 +1474,13 @@ static size_t put_desc(unsigned char *p, const char *ascii, int scriptCode)
         memset(q, 0, 67);
     }
     q += 67;
-    *q = 0;
-    return (size_t)(q + 1 - p);
+    /* The block as the profile writes it may or may not carry the trailing
+       terminator that follows the ScriptCode field, and the caller has worked
+       out which from the profile's own length, so the byte is written only
+       when the length has room for it. */
+    if (q < p + blockLen)
+        *q = 0;
+    return blockLen;
 }
 
 /* One tone curve, of either kind.  Returns the length of the block. */
@@ -1526,7 +1544,7 @@ static void put_chad(unsigned char *p, const int32_t v[9])
    is v2.1 rather than v4 and describes a 'GRAY' space, though like the RGB
    ones it has an XYZ PCS and every other field to match. */
 static void put_icc_header(unsigned char *p, size_t len, const int created[6],
-    int32_t version, const char *space)
+    int32_t version, const char *space, const char *manufacturer)
 {
     int i;
 
@@ -1540,7 +1558,12 @@ static void put_icc_header(unsigned char *p, size_t len, const int created[6],
         put_be16(p + 24 + 2 * i, (unsigned)created[i]);
     memcpy(p + CGICCSignatureOffset, "acsp", 4);
     memcpy(p + 40, "APPL", 4);
-    memcpy(p + 48, "APPL", 4);
+    /* The manufacturer is the one header field with no single spelling: three
+       of the profiles here write the four characters in lower case, one writes
+       'none' rather than naming itself at all, and the rest use the upper case
+       the CMM signature uses.  None of it is required by the format, and the
+       choices are scattered, so the row says which it wants. */
+    memcpy(p + 48, manufacturer, 4);
     put_be32(p + 68, 0x0000f6d6);
     put_be32(p + 72, 0x00010000);
     put_be32(p + 76, 0x0000d32d);
@@ -1554,13 +1577,8 @@ static void put_icc_header(unsigned char *p, size_t len, const int created[6],
 static void put_rgb_v4_header(unsigned char *p, size_t len, const int created[6],
     int32_t version, int lowercaseManufacturer)
 {
-    put_icc_header(p, len, created, version, "RGB ");
-    /* Most profiles here give their manufacturer as the four upper-case bytes
-       the CMM signature uses, and three give the same four characters lower
-       case.  Nothing about the format requires either, and the two spellings
-       are 0x20 apart in one header field, so the row says which it wants. */
-    if (lowercaseManufacturer)
-        memcpy(p + 48, "appl", 4);
+    put_icc_header(p, len, created, version, "RGB ",
+        lowercaseManufacturer ? "appl" : "APPL");
 }
 
 /* Assemble the profile for one of these spaces.  The blocks are laid out one
@@ -1666,7 +1684,7 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
        offsets here rather than below. */
     if (v->extrasWhere == CGICCRGBV4ExtrasAfterDesc) {
         for (i = 0; i < v->extraCount; i++) {
-            size_t elen = put_extra_tag(NULL, v, i);
+            size_t elen = put_rgb_v4_extra(NULL, v, i);
 
             tagLen[extra + i] = (int32_t)elen;
             tagOff[extra + i] = (int32_t)icc_pad(len);
@@ -1688,7 +1706,7 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
        its two. */
     if (v->extrasWhere == CGICCRGBV4ExtrasAfterCurve) {
         for (i = 0; i < v->extraCount; i++) {
-            size_t elen = put_extra_tag(NULL, v, i);
+            size_t elen = put_rgb_v4_extra(NULL, v, i);
 
             tagLen[extra + i] = (int32_t)elen;
             tagOff[extra + i] = (int32_t)icc_pad(len);
@@ -1730,7 +1748,7 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
     }
 
     if (v->legacyStrings) {
-        put_desc(p + tagOff[desc], v->desc, v->descScriptCode);
+        put_desc(p + tagOff[desc], v->desc, v->descScriptCode, dlen);
         put_text(p + tagOff[cprt], v->cprt);
     } else {
         put_mluc(p + tagOff[desc], v->desc);
@@ -1741,7 +1759,7 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
         put_xyz_i32(p + tagOff[rXYZ + i], v->colorants + 3 * i);
     put_icc_curve(p + tagOff[curve], &v->trc);
     for (i = 0; i < v->extraCount; i++)
-        put_extra_tag(p + tagOff[extra + i], v, i);
+        put_rgb_v4_extra(p + tagOff[extra + i], v, i);
     if (!v->omitChad)
         put_chad(p + tagOff[chad], v->chad);
     if (v->cicp)
@@ -2156,28 +2174,34 @@ static CGColorSpaceRef CGColorSpaceCreateNamedRGBV4(CFStringRef name)
     return NULL;
 }
 
-/* The v2.1 monochrome/TRC template.
+/* The v2 monochrome/TRC template, holding two profiles.
 
-   Linear Gray is a gray profile rather than an RGB one and a v2.1 profile
-   rather than a v4, so it shares almost nothing with the eleven above but the
-   header: four tags rather than ten or eleven, the description and copyright as
-   the legacy 'desc' and 'text' types rather than 'mluc' records, no colorants
-   at all, and one tone curve rather than three.  What it shares is the white
-   point and the header illuminant, which agree exactly here -- the quantisation
-   step the RGB profiles mostly lose a unit to is not lost by this one.
+   Both gray spaces are gray profiles rather than RGB ones, and v2 rather than
+   v4, so they share almost nothing with the eleven above but the header: four
+   tags apiece rather than ten or eleven, the description and copyright as the
+   legacy 'desc' and 'text' types rather than 'mluc' records, no colorants at
+   all, and one tone curve rather than three.  What they share with each other
+   is the shape, the header illuminant, and the 461/256 gamma; what they share
+   with the RGB profiles is the white point, and only exactly -- the
+   quantisation step those mostly lose a unit to is not lost by these.
 
-   The tag order is description, copyright, white point, tone curve, and it is
-   the same as the v4 template's for as far as the two run: 'desc', 'cprt',
-   'wtpt'.  The tone curve is the one-word identity every other tone curve here
-   is a special case of.
+   The tag order is description, constant tag, copyright, white point, tone
+   curve, and it is the same as the v4 template's for as far as the two run:
+   'desc', 'cprt', 'wtpt'.  The constant tag is there only when a row carries
+   one, and 'dscm' goes straight after the description as it does on that
+   template.  The tone curve is the one-word identity every other tone curve
+   here is a special case of.
 
-   The four tags are laid out the same way, each block aligned and the next
-   beginning after it, so the data starts at 132 plus four entries and the two
-   strings run into each other's padding: the description ends at 282, the
-   copyright is written at 284 and ends at 319, and the white point follows at
-   320.  That leaves the tone curve's fourteen bytes finishing at 354, and the
-   profile is the 356 bytes that pads that to a four-byte boundary. */
-enum { CGICCGrayV2TagCount = 4 };
+   The blocks are laid out the same way as on the v4 template, each aligned and
+   the next beginning after it, so for LinearGray -- the one profile here with
+   no constant tag, and the one the offsets below are worked out for -- the
+   data starts at 132 plus four entries and the two strings run into each
+   other's padding: the description ends at 282, the copyright is written at
+   284 and ends at 319, and the white point follows at 320.  That leaves the
+   tone curve's fourteen bytes finishing at 354, and the profile is the 356
+   bytes that pads that to a four-byte boundary.  GenericGray inserts its 1,622
+   byte 'dscm' between the description and the copyright and so lands at 2,020
+   bytes. */
 
 /* One gray space's parameters.  As with the RGB rows above, these are
    constants recovered from the profile the name resolves to rather than
@@ -2188,10 +2212,46 @@ struct cgs_gray_v2 {
     int created[6];
     int32_t wtpt[3];
     struct cgs_icc_curve trc;
+    /* The profile version, as the four-byte header field.  The linear gray
+       profile is v2.1, the generic one v2.2, and both predate the 'mluc'
+       string types, which is why they carry legacy strings here as well. */
+    int32_t version;
+    /* The manufacturer, spelled the way this row writes it; the two gray
+       profiles differ, one naming itself and one writing 'none'. */
+    const char *manufacturer;
+    /* Whether the 'desc' carries a ScriptCode copy of its ASCII; see
+       put_desc.  The generic gray profile does and the linear one does not. */
+    int descScriptCode;
+    /* Whether the description carries the terminator byte that follows its
+       ScriptCode field.  The linear profile does and the generic one does
+       not, which is the one byte of difference between their otherwise
+       identical 12-byte, gap, count, text and 67-byte-field arrangements. */
+    int descTrailer;
+    /* A constant tag, which for these two means only the 'dscm' translation
+       list, and where in the table it belongs. */
+    const unsigned char *extraData[CGICCRGBV4MaxExtraTags];
+    const char *extraName[CGICCRGBV4MaxExtraTags];
+    const struct cgs_mluc_record *extraRecords[CGICCRGBV4MaxExtraTags];
+    int extraRecordCount[CGICCRGBV4MaxExtraTags];
+    int32_t extraLen[CGICCRGBV4MaxExtraTags];
+    int extraCount;
+    int extrasWhere;
 };
 
-/* Assemble the profile.  Four blocks go out -- the two strings, the white point
-   and the single tone curve -- and the four tags are pointed at them. */
+/* One of this row's constant tags, which for the gray template is only ever
+   the same shape of thing the RGB rows carry: see put_extra_tag. */
+static size_t put_gray_v2_extra(unsigned char *p, const struct cgs_gray_v2 *v,
+    int i)
+{
+    return put_extra_tag(p, v->extraData, v->extraRecords, v->extraLen,
+        v->extraRecordCount, i);
+}
+
+/* Assemble the profile.  Four blocks always go out -- the two strings, the
+   white point and the single tone curve -- plus whatever constant tag the row
+   carries, and the tags are pointed at them.  The generic gray profile's one
+   constant tag is the 'dscm' translation list and comes second, straight after
+   the description, which is where the RGB template's goes too. */
 static unsigned char *put_gray_v2(const struct cgs_gray_v2 *v, size_t *outLen)
 {
     enum { desc, cprt, wtpt, curve, blockCount };
@@ -2200,63 +2260,112 @@ static unsigned char *put_gray_v2(const struct cgs_gray_v2 *v, size_t *outLen)
     };
     unsigned char *p;
     size_t dlen, tlen, len;
-    int32_t tagOff[blockCount], tagLen[blockCount];
-    int i;
+    const char *name[blockCount + CGICCRGBV4MaxExtraTags];
+    int32_t blockLen[blockCount + CGICCRGBV4MaxExtraTags];
+    int32_t blockOff[blockCount + CGICCRGBV4MaxExtraTags];
+    int n, i, k;
 
     /* put_desc and put_text both size themselves from the string, so the two
-       lengths are worked out here rather than written down. */
-    dlen = 12 + (strlen(v->desc) + 1) + 4 + 4 + 2 + 67 + 1;
+       lengths are worked out here rather than written down.
+
+       The description ends with the ScriptCode field and then a terminator, and
+       the two profiles on this template disagree about whether that last byte
+       is there: the linear one carries it and the generic one does not, which
+       is why the field is a row's to say rather than a constant.  Nothing about
+       the format requires either.  The RGB template does not need the choice,
+       since the three profiles on it that carry legacy strings all have it. */
+    dlen = 12 + (strlen(v->desc) + 1) + 4 + 4 + 2
+        + (v->descScriptCode ? 1 : 0) + 67 + v->descTrailer;
     tlen = v->trc.parametric ? 12 + 4 * (size_t)v->trc.words : 14;
 
+    /* The tag table lists the description, then this row's constant tags if it
+       has any, then the rest.  After the description is the one placement the
+       gray template sees -- both gray profiles with an extra put 'dscm' there
+       -- and the RGB template's own enum is reused for it rather than
+       duplicated, since the two mean the same thing. */
+    n = 0;
+    name[n++] = fixed[0];
+    if (v->extrasWhere == CGICCRGBV4ExtrasAfterDesc) {
+        for (k = 0; k < v->extraCount; k++)
+            name[n++] = v->extraName[k];
+    }
+    for (i = 1; i < blockCount; i++)
+        name[n++] = fixed[i];
+
     /* As in put_rgb_v4, the offsets are assigned in one pass and used again
-       below, so the two cannot disagree about where a block went. */
-    len = CGICCTagTableOffset + (size_t)CGICCGrayV2TagCount * CGICCTagEntrySize;
-    tagLen[desc] = (int32_t)dlen;
-    tagOff[desc] = (int32_t)icc_pad(len);
-    len = icc_pad(len) + dlen;
-    tagLen[cprt] = (int32_t)(8 + strlen(v->cprt) + 1);
-    tagOff[cprt] = (int32_t)icc_pad(len);
-    len = icc_pad(len) + tagLen[cprt];
-    tagLen[wtpt] = CGICCXYZLength;
-    tagOff[wtpt] = (int32_t)icc_pad(len);
-    len = icc_pad(len) + CGICCXYZLength;
-    tagLen[curve] = (int32_t)tlen;
-    tagOff[curve] = (int32_t)icc_pad(len);
-    len = icc_pad(len) + tlen;
+       below, so the two cannot disagree about where a block went.  The blocks
+       are laid out in the order the table lists them. */
+    len = CGICCTagTableOffset + (size_t)n * CGICCTagEntrySize;
+    k = 0;
+    for (i = 0; i < n; i++) {
+        int32_t l;
+
+        if (i == 0)
+            l = (int32_t)dlen;
+        else if (i < 1 + (v->extrasWhere == CGICCRGBV4ExtrasAfterDesc
+                     ? v->extraCount : 0))
+            l = (int32_t)put_gray_v2_extra(NULL, v, k++);
+        else if (name[i] == fixed[1])
+            l = (int32_t)(8 + strlen(v->cprt) + 1);
+        else if (name[i] == fixed[2])
+            l = CGICCXYZLength;
+        else
+            l = (int32_t)tlen;
+        blockLen[i] = l;
+        blockOff[i] = (int32_t)icc_pad(len);
+        len = icc_pad(len) + (size_t)l;
+    }
     /* The tone curve is fourteen bytes and leaves the profile two short of a
-       boundary, so the size counts the padding rather than the last tag. */
+       boundary in the linear case, so the size counts the padding rather than
+       the last tag. */
     len = icc_pad(len);
 
     p = calloc(1, len);
     if (!p)
         return NULL;
 
-    put_icc_header(p, len, v->created, CGICCVersionV21, "GRAY");
-    put_be32(p + CGICCTagCountOffset, (uint32_t)CGICCGrayV2TagCount);
-    for (i = 0; i < CGICCGrayV2TagCount; i++) {
+    put_icc_header(p, len, v->created, v->version, "GRAY", v->manufacturer);
+    put_be32(p + CGICCTagCountOffset, (uint32_t)n);
+    for (i = 0; i < n; i++) {
         unsigned char *e = p + CGICCTagTableOffset + i * CGICCTagEntrySize;
 
-        memcpy(e, fixed[i], 4);
-        put_be32(e + 4, tagOff[i]);
-        put_be32(e + 8, tagLen[i]);
+        memcpy(e, name[i], 4);
+        put_be32(e + 4, (uint32_t)blockOff[i]);
+        put_be32(e + 8, (uint32_t)blockLen[i]);
     }
 
-    /* The gray template has one description and it takes the empty ScriptCode
-       form, which put_desc writes when told not to fill it. */
-    put_desc(p + tagOff[desc], v->desc, 0);
-    put_text(p + tagOff[cprt], v->cprt);
-    put_xyz_i32(p + tagOff[wtpt], v->wtpt);
-    put_icc_curve(p + tagOff[curve], &v->trc);
+    /* The blocks in table order.  The generic gray profile's description takes
+       the ScriptCode form and the linear one takes the empty form, and each
+       row says which is its own. */
+    k = 0;
+    for (i = 0; i < n; i++) {
+        unsigned char *e = p + blockOff[i];
+
+        if (i == 0)
+            put_desc(e, v->desc, v->descScriptCode, dlen);
+        else if (i < 1 + (v->extrasWhere == CGICCRGBV4ExtrasAfterDesc
+                      ? v->extraCount : 0))
+            put_gray_v2_extra(e, v, k++);
+        else if (name[i] == fixed[1])
+            put_text(e, v->cprt);
+        else if (name[i] == fixed[2])
+            put_xyz_i32(e, v->wtpt);
+        else
+            put_icc_curve(e, &v->trc);
+    }
 
     *outLen = len;
     return p;
 }
 
-/* The one profile, which the two names below share.  Recovered from the space
-   kCGColorSpaceLinearGray resolves to; put_gray_v2 was checked against it by
-   rebuilding the profile and comparing it byte for byte. */
+/* The one profile, which the two linear names below share.  Recovered from the
+   space kCGColorSpaceLinearGray resolves to; put_gray_v2 was checked against it
+   by rebuilding the profile and comparing it byte for byte. */
 static const struct cgs_gray_v2 LinearGray = {
     .desc = "Linear Gray",
+    .version = CGICCVersionV21,
+    .manufacturer = "APPL",
+    .descTrailer = 1,
     .created = { 2016, 1, 1, 0, 0, 0 },
     .cprt = "Copyright Apple Inc., 2016",
     /* The D50 illuminant, quantised exactly -- unlike seven of the eight
@@ -2265,21 +2374,95 @@ static const struct cgs_gray_v2 LinearGray = {
     .trc = { 0, 0, 256, 0, { 0x0 } },  /* u8Fixed8 gamma of 1.0 */
 };
 
-/* The two names, and the extended flag each carries.
+/* The thirty-one translations the generic gray profile's 'dscm' carries, in
+   the order it lists them.  Slovak first and Arabic last with nothing sorted
+   in between, which is Apple's own order and is reproduced as found -- the
+   same order, and nearly the same strings, as GenericRGB's list.  None of
+   these repeats an earlier one, so where two of the RGB translations share a
+   string this list gives each its own copy instead. */
+static const struct cgs_mluc_record GenericGrayDscm[31] = {
+    { "skSK", "Všeobecný sivý profil" },
+    { "daDK", "Generel grå-profil" },
+    { "caES", "Perfil de gris genèric" },
+    { "viVN", "Cấu hình Màu xám Chung" },
+    { "ptBR", "Perfil Cinza Genérico" },
+    { "ukUA", "Загальний профайл Gray" },
+    { "frFU", "Profil générique gris" },
+    { "huHU", "Általános szürke profil" },
+    { "zhTW", "通用灰階色彩描述" },
+    { "koKR", "일반 Gray 프로파일" },
+    { "nbNO", "Generisk gråtoneprofil" },
+    { "csCZ", "Obecný šedý profil" },
+    { "heIL", "פרופיל Gray כללי" },
+    { "roRO", "Profil gri generic" },
+    { "deDE", "Allgemeines Graustufen-Profil" },
+    { "itIT", "Profilo grigio generico" },
+    { "svSE", "Generisk gråskaleprofil" },
+    { "zhCN", "普通灰度描述文件" },
+    { "jaJP", "一般グレイプロファイル" },
+    { "elGR", "Γενικό προφίλ γκρι" },
+    { "ptPO", "Perfil genérico de cinzentos" },
+    { "nlNL", "Algemeen grijsprofiel" },
+    { "esES", "Perfil gris genérico" },
+    { "thTH", "โปรไฟล์สีเทาทั่วไป" },
+    { "trTR", "Genel Gri Profili" },
+    { "fiFI", "Yleinen harmaaprofiili" },
+    { "hrHR", "Generički profil sivih tonova" },
+    { "plPL", "Uniwersalny profil szarości" },
+    { "ruRU", "Общий серый профиль" },
+    { "enUS", "Generic Gray Profile" },
+    { "arEG", "ملف تعريف Gray العام" }
+};
+
+/* kCGColorSpaceGenericGray's profile, the second of the two on this template
+   and the only one here that is not the linear one.  Recovered from the space
+   the name resolves to and checked byte for byte by rebuilding it.
+
+   It differs from LinearGray in more places than the template used to allow
+   for, which is what the row's extra fields are for.  It is a v2.2 profile
+   and it is the only one of the profiles here that declines to name a
+   manufacturer, writing 'none' in that header field where every other writes
+   either 'APPL' or 'appl'.  Its description carries the ScriptCode copy of the
+   ASCII, and it lists thirty-one translations in a 'dscm' straight after the
+   description -- the same v2.2 shape, the same tag position and the same gamma
+   of 461/256 that kCGColorSpaceGenericRGB's carries. */
+static const struct cgs_gray_v2 GenericGray = {
+    .desc = "Generic Gray Profile",
+    .version = CGICCVersionV22,
+    .manufacturer = "none",
+    .descScriptCode = 1,
+    .created = { 2000, 2, 14, 12, 0, 0 },
+    .cprt = "Copyright 2007 Apple Inc., all rights reserved.",
+    /* A unit below D50 in X and Y and a little above it in Z -- where
+       GenericRGB's matching white point is 0xf352, 0x10000, 0x116cf, this one
+       is a step lower in the first two and two steps higher in the third. */
+    .wtpt = { 0xf351, 0x10000, 0x116cc },
+    .trc = { 0, 0, 461, 0, { 0x0 } },  /* u8Fixed8 gamma, 461/256 */
+    .extraName = { "dscm" },
+    .extraRecords = { GenericGrayDscm },
+    .extraRecordCount = { 31 },
+    .extraCount = 1,
+    .extrasWhere = CGICCRGBV4ExtrasAfterDesc,
+};
+
+/* The three names, and the extended flag each carries.
 
    kCGColorSpaceExtendedLinearGray takes the very same 356 bytes as the space
    it is named after: the profile records no range, so the profile cannot be
    what tells the two apart.  They are reported unequal and are the same space
    once the range is ignored, which is the same arrangement the extended RGB
-   names use. */
-enum { CGColorSpaceNamedGrayV2Count = 2 };
+   names use.  kCGColorSpaceGenericGray has no extended counterpart here, and
+   builds its own profile. */
+enum { CGColorSpaceNamedGrayV2Count = 3 };
 
 static const struct {
     const char *name;
+    const struct cgs_gray_v2 *profile;
     bool extended;
 } CGColorSpaceNamedGrayV2[CGColorSpaceNamedGrayV2Count] = {
-    { "kCGColorSpaceLinearGray", false },
-    { "kCGColorSpaceExtendedLinearGray", true }
+    { "kCGColorSpaceLinearGray", &LinearGray, false },
+    { "kCGColorSpaceExtendedLinearGray", &LinearGray, true },
+    { "kCGColorSpaceGenericGray", &GenericGray, false }
 };
 
 static struct CGColorSpace *CGColorSpaceNamedGrayV2State[CGColorSpaceNamedGrayV2Count];
@@ -2299,7 +2482,7 @@ static CGColorSpaceRef CGColorSpaceCreateNamedGrayV2(CFStringRef name)
             continue;
         if (CGColorSpaceNamedGrayV2State[i])
             return CGColorSpaceNamedGrayV2State[i];
-        profile = put_gray_v2(&LinearGray, &len);
+        profile = put_gray_v2(CGColorSpaceNamedGrayV2[i].profile, &len);
         if (!profile)
             return NULL;
         s = calloc(1, sizeof *s);
