@@ -429,7 +429,7 @@ CGColorSpaceRef CGColorSpaceCreatePattern(CGColorSpaceRef baseSpace)
 
    A NULL name and the empty string both return NULL rather than faulting.
 
-   Thirty-five of the fifty name constants resolve here, where Apple resolves
+   Thirty-six of the fifty name constants resolve here, where Apple resolves
    forty-four.  The identifier table is not the set of names this accepts and is
    not even most of it: sweeping every constant reachable through the API gives
    50 distinct names, of which Apple's 44 resolve and six return NULL.  Of those
@@ -442,7 +442,7 @@ CGColorSpaceRef CGColorSpaceCreatePattern(CGColorSpaceRef baseSpace)
    ColoredPattern -- so a lookup built from the identifier table alone would
    refuse eight names Apple accepts, among them kCGColorSpaceGenericGray, which
    reads as identifier 0 and so is indistinguishable from a name Apple has never
-   heard of.  The nine names this step still refuses are the ones carrying a
+   heard of.  The eight names this step still refuses are the ones carrying a
    profile it cannot emit yet.
 
    The three device names resolve to the file-scope singletons, so the named
@@ -507,9 +507,9 @@ CGColorSpaceRef CGColorSpaceCreateWithName(CFStringRef name)
         return s;
     }
 
-    /* Eighteen of the remaining names resolve to the thirteen profiles that
+    /* Nineteen of the remaining names resolve to the fourteen profiles that
        share the RGB template, and CGColorSpaceCreateNamedRGBV4 answers for
-       exactly those eighteen -- including the three extended-range aliases,
+       exactly those nineteen -- including the three extended-range aliases,
        which take the same profile bytes as their base and differ only in the
        name they report and the extended flag they carry. */
     {
@@ -607,9 +607,10 @@ enum {
     /* The rest of the header that CGColorSpaceCreateWithICCData reads. */
     CGICCProfileSizeOffset = 0,
     CGICCVersionOffset = 8,
-    /* The two versions the profiles here declare: v2.1 for the two that predate
-       the multi-localized string types, v4 for the rest. */
+    /* The versions the profiles here declare: v2.1 and v2.2 for the three that
+       predate the multi-localized string types, v4 for the rest. */
     CGICCVersionV21 = 0x02100000,
+    CGICCVersionV22 = 0x02200000,
     CGICCVersionV4 = 0x04000000,
     CGICCDeviceClassOffset = 12,
     CGICCSignatureOffset = 36,
@@ -1119,7 +1120,7 @@ enum {
        and both constant tags. */
     CGICCRGBV4FixedTags = 6,    /* desc, cprt, wtpt, rXYZ, gXYZ, bXYZ */
     CGICCRGBV4CurveTags = 3,    /* rTRC, gTRC, bTRC, all sharing one block */
-    /* Two constant tags is what the eighteen profiles below need between them
+    /* Two constant tags is what the nineteen profiles below need between them
        -- CoreMedia709 carries both, every other space neither -- so two is the
        most the template allows rather than an arbitrary bound. */
     CGICCRGBV4MaxExtraTags = 2,
@@ -1135,6 +1136,15 @@ enum {
 enum {
     CGICCRGBTRCRedFirst = 0,
     CGICCRGBTRCBlueFirst = 1
+};
+
+/* Where a space's constant tags sit in its tag table.  Nothing in the format
+   decides this -- CoreMedia709 lists its two between the first tone curve and
+   'chad', while GenericRGB's one is second, straight after the description --
+   so the row says which of the two it is. */
+enum {
+    CGICCRGBV4ExtrasAfterCurve = 0,
+    CGICCRGBV4ExtrasAfterDesc = 1
 };
 
 /* A tone curve as these profiles store one.
@@ -1164,14 +1174,20 @@ struct cgs_rgb_v4 {
     const char *desc;
     const char *cprt;
     /* The profile version, as the four-byte field the header carries.  Sixteen
-       of the eighteen rows are v4 and leave this zero; CoreMedia709 and
-       GenericRGBLinear are v2.1 and say so here.  A v2.1 profile is the reason
-       those two carry the legacy string types below, so the facts belong
-       together. */
+       of the nineteen rows are v4 and leave this zero; CoreMedia709 and
+       GenericRGBLinear are v2.1 and GenericRGB is v2.2, and each says so here.
+       A version below 2.4 is the reason those three carry the legacy string
+       types below, so the facts belong together. */
     int32_t version;
     /* Whether the strings are the v2 forms -- a legacy 'desc' and 'text' -- or
        the 'mluc' records the rest of the template uses. */
     int legacyStrings;
+    /* Whether the 'desc' also carries a ScriptCode copy of its ASCII, which one
+       profile does and the rest do not; see put_desc. */
+    int descScriptCode;
+    /* Whether the header's manufacturer field is the lower-case spelling, which
+       three profiles use and the rest do not; see put_rgb_v4_header. */
+    int lowercaseManufacturer;
     int created[6];
     int32_t wtpt[3];
     int32_t colorants[9];
@@ -1190,15 +1206,28 @@ struct cgs_rgb_v4 {
     int cicp;
     int32_t cicpValue[4];
     int profileId;
-    /* Constant tags carried verbatim, in tag-table order, after the first tone
-       curve.  CoreMedia709 holds two -- 'vcgt' and 'ndin' -- and their bytes
-       are stored rather than derived, because what they encode is not stated
-       anywhere this file can consult and a second reading of them would be a
-       guess.  Both are copied whole, signature and size field included. */
+    /* Constant tags carried in the tag table, either stored whole or given as
+       the translations to build an 'mluc' from.
+
+       Stored whole, CoreMedia709's 'vcgt' and 'ndin': both blocks carry their
+       own signature and their own length, and what they encode is not written
+       down anywhere this file could check it against, so copying the block
+       copies the signature the table points at and the length a reader inside
+       the block agrees with.  Built instead, GenericRGB's 'dscm', whose thirty-
+       one translations are the description itself rather than something whose
+       meaning needs recovering.
+
+       The two forms are told apart by which array the row filled, never both,
+       and put_extra_tag is what reads either one. */
     const char *extraName[CGICCRGBV4MaxExtraTags];
     const unsigned char *extraData[CGICCRGBV4MaxExtraTags];
+    const struct cgs_mluc_record *extraRecords[CGICCRGBV4MaxExtraTags];
     int32_t extraLen[CGICCRGBV4MaxExtraTags];
+    int extraRecordCount[CGICCRGBV4MaxExtraTags];
     int extraCount;
+    /* Whether those tags go straight after the description or after the first
+       tone curve; see CGICCRGBV4ExtrasAfterDesc. */
+    int extrasWhere;
 };
 
 /* Round up to the next four-byte boundary.  Tag data is stored aligned, and
@@ -1208,24 +1237,178 @@ static size_t icc_pad(size_t off)
     return (off + 3) & ~(size_t)3;
 }
 
-/* A 'mluc' record holding one en-US string.  Its length field counts the
-   bytes of UTF-16 rather than characters, the offset is absolute in the
-   profile rather than relative to the tag, and the record itself is twelve
-   bytes.  Returns the length of the whole block. */
+/* One translation: the four-byte language and country code the record names,
+   and the string as UTF-8. */
+struct cgs_mluc_record {
+    const char *code;
+    const char *text;
+};
+
+/* The most records any 'mluc' here holds, which is the description of the
+   generic RGB space: thirty-one languages, no two of the other profiles
+   carrying anything like as many. */
+enum { CGICCMlucMaxRecords = 31 };
+
+/* One UTF-8 string as big-endian UTF-16 at p, returning its length in bytes.
+
+   Every character in the translations below is inside the basic plane, so a
+   writer that emitted only the BMP would produce the right answer for all of
+   them -- but a code point outside it is written as the surrogate pair it needs
+   rather than truncated to something in range, so the conversion is right for
+   the input it is actually given. */
+static size_t put_utf16(unsigned char *p, const char *utf8)
+{
+    const unsigned char *s = (const unsigned char *)utf8;
+    size_t n = 0;
+
+    while (*s) {
+        unsigned c = *s++;
+        uint32_t cp;
+        size_t extra;
+
+        if (c < 0x80) {
+            cp = c;
+            extra = 0;
+        } else if ((c & 0xe0) == 0xc0) {
+            cp = c & 0x1fu;
+            extra = 1;
+        } else if ((c & 0xf0) == 0xe0) {
+            cp = c & 0x0fu;
+            extra = 2;
+        } else {
+            cp = c & 0x07u;
+            extra = 3;
+        }
+        while (extra--)
+            cp = (cp << 6) | (uint32_t)(*s++ & 0x3f);
+        if (cp < 0x10000) {
+            put_be16(p + n, (unsigned)cp);
+            n += 2;
+        } else {
+            cp -= 0x10000;
+            put_be16(p + n, (unsigned)(0xd800 + (cp >> 10)));
+            put_be16(p + n + 2, (unsigned)(0xdc00 + (cp & 0x3ff)));
+            n += 4;
+        }
+    }
+    return n;
+}
+
+/* The length the string above would occupy, without writing it.  Two passes
+   over the same string rather than one that counts and writes together,
+   because the caller has to know how long every block is before any of them is
+   allocated. */
+static size_t utf16_length(const char *utf8)
+{
+    const unsigned char *s = (const unsigned char *)utf8;
+    size_t n = 0;
+
+    while (*s) {
+        unsigned c = *s++;
+
+        if (c < 0x80) {
+            n += 2;
+        } else if ((c & 0xe0) == 0xc0) {
+            s += 1;
+            n += 2;
+        } else if ((c & 0xf0) == 0xe0) {
+            s += 2;
+            n += 2;
+        } else {
+            /* Four bytes can carry a code point outside the basic plane, which
+               is two UTF-16 units rather than one. */
+            s += 3;
+            n += 4;
+        }
+    }
+    return n;
+}
+
+/* An 'mluc' block holding one record per entry, in the order given.
+
+   The header is the signature, four reserved bytes, the record count and the
+   record size; the records follow it, twelve bytes each, and each carries a
+   language code, a length in bytes of UTF-16, and an offset counted from the
+   start of the tag.  The strings follow the records.
+
+   A string that repeats an earlier one takes that string's offset instead of a
+   second copy of it, which is why the offsets need not rise with the record
+   order: two of GenericRGB's translations are the same text as another
+   language's, Swedish as Norwegian and Spanish as European Portuguese.  That
+   also means the offsets cannot be written as they are worked out, so the
+   records are walked twice -- once to place every string and remember where,
+   once to write the block out.
+
+   A null p measures the block instead of writing it, which is what the profile
+   layout needs: the tag offsets are assigned before anything is allocated, so
+   every length has to be known first. */
+static size_t put_mluc_records(unsigned char *p, const struct cgs_mluc_record *r,
+    int n)
+{
+    int32_t off[CGICCMlucMaxRecords], bytes[CGICCMlucMaxRecords];
+    size_t len = 16 + 12 * (size_t)n;
+    int i, k;
+
+    for (i = 0; i < n; i++) {
+        int shared = 0;
+
+        bytes[i] = (int32_t)utf16_length(r[i].text);
+        off[i] = (int32_t)len;
+        for (k = 0; k < i; k++) {
+            if (strcmp(r[i].text, r[k].text))
+                continue;
+            off[i] = off[k];
+            shared = 1;
+            break;
+        }
+        if (!shared)
+            len += (size_t)bytes[i];
+    }
+
+    if (p) {
+        memcpy(p, "mluc", 4);
+        put_be32(p + 4, 0);
+        put_be32(p + 8, (uint32_t)n);
+        put_be32(p + 12, 12);
+        for (i = 0; i < n; i++) {
+            unsigned char *e = p + 16 + 12 * i;
+
+            memcpy(e, r[i].code, 4);
+            put_be32(e + 4, bytes[i]);
+            put_be32(e + 8, off[i]);
+            /* Written for every record, shared or not: the two are the same
+               bytes at the same place, and testing for the repeat again here
+               would only risk disagreeing with the pass above. */
+            put_utf16(p + off[i], r[i].text);
+        }
+    }
+    return len;
+}
+
+/* A 'mluc' block holding one en-US string, which is what the template's own two
+   strings are.  With a single record there is nothing to share, so the offset
+   is simply where the string lands: twenty-eight bytes in, after the sixteen
+   byte header and the one twelve byte record.  Returns the length of the whole
+   block. */
 static size_t put_mluc(unsigned char *p, const char *utf8)
 {
-    size_t chars = strlen(utf8), i;
+    struct cgs_mluc_record record = { "enUS", utf8 };
 
-    memcpy(p, "mluc", 4);
-    put_be32(p + 4, 0);
-    put_be32(p + 8, 1);
-    put_be32(p + 12, 12);
-    memcpy(p + 16, "enUS", 4);
-    put_be32(p + 20, (int32_t)(2 * chars));
-    put_be32(p + 24, 28);
-    for (i = 0; i < chars; i++)
-        put_be16(p + 28 + 2 * i, (unsigned char)utf8[i]);
-    return 28 + 2 * chars;
+    return put_mluc_records(p, &record, 1);
+}
+
+/* One constant tag, as a length or as the block itself: a stored block is
+   copied whole, and a list of translations is built into an 'mluc'.  Which of
+   the two a tag is shows in which array the row filled.  Returns the length,
+   and writes nothing at all when p is null, for the reason put_mluc_records
+   gives. */
+static size_t put_extra_tag(unsigned char *p, const struct cgs_rgb_v4 *v, int i)
+{
+    if (v->extraRecords[i])
+        return put_mluc_records(p, v->extraRecords[i], v->extraRecordCount[i]);
+    if (p)
+        memcpy(p, v->extraData[i], (size_t)v->extraLen[i]);
+    return (size_t)v->extraLen[i];
 }
 
 /* 'text', the tag the copyright uses in a v2 profile where the v4 template
@@ -1247,21 +1430,39 @@ static size_t put_text(unsigned char *p, const char *ascii)
    The length in the header counts the terminator, so an eleven-character name
    records twelve and occupies twelve bytes, and the ASCII half is not padded
    out to the sixty-seven bytes its type nominally allows -- the Unicode half
-   starts immediately after.  Both remaining halves are present but empty: four
-   zero bytes of language code, four of count, and then the ScriptCode block,
-   which is a two-byte code, sixty-seven bytes of description and a count. */
-static size_t put_desc(unsigned char *p, const char *ascii)
+   starts immediately after.  What follows it is the Unicode language code, the
+   Unicode count, the ScriptCode code, the ScriptCode description and a final
+   count byte, and the first four of those are zero on every profile here: the
+   description is ASCII and has no Unicode form.
+
+   The ScriptCode half is where the profiles differ.  Most leave it zero to the
+   end, and one -- the generic RGB space -- writes the same ASCII into it behind
+   a count of twenty, so the block is a byte longer than the empty form and the
+   count sits in front of the description rather than only after it.  The count
+   includes the terminator, as the ASCII count above does, and the description
+   is still padded out to sixty-seven. */
+static size_t put_desc(unsigned char *p, const char *ascii, int scriptCode)
 {
     size_t n = strlen(ascii);
+    unsigned char *q = p + 12 + n + 1;
 
     memcpy(p, "desc", 4);
     put_be32(p + 4, 0);
     put_be32(p + 8, (int32_t)(n + 1));
     memcpy(p + 12, ascii, n + 1);
-    /* Language code, Unicode count, then the whole ScriptCode block: all of it
-       zero, so the tag ends up as one string and a run of padding. */
-    memset(p + 12 + n + 1, 0, 4 + 4 + 2 + 67 + 1);
-    return 12 + (n + 1) + 4 + 4 + 2 + 67 + 1;
+    memset(q, 0, 4 + 4 + 2);
+    q += 4 + 4 + 2;
+    if (scriptCode) {
+        *q++ = (unsigned char)(n + 1);
+        memcpy(q, ascii, n + 1);
+        q += n + 1;
+        memset(q, 0, 67 - (n + 1));
+    } else {
+        memset(q, 0, 67);
+    }
+    q += 67;
+    *q = 0;
+    return (size_t)(q + 1 - p);
 }
 
 /* One tone curve, of either kind.  Returns the length of the block. */
@@ -1346,14 +1547,20 @@ static void put_icc_header(unsigned char *p, size_t len, const int created[6],
     memcpy(p + 80, "appl", 4);
 }
 
-/* The header for an RGB space on this template.  Sixteen of the eighteen
-   profiles are v4, and CoreMedia709 and GenericRGBLinear are v2.1 -- which is
-   why they carry the legacy string types, and is the reason the version is a
-   row's to give rather than a constant here. */
+/* The header for an RGB space on this template.  Sixteen of the nineteen
+   profiles are v4, and CoreMedia709, GenericRGBLinear and GenericRGB are v2.1
+   and v2.2 -- which is why they carry the legacy string types, and is the
+   reason the version is a row's to give rather than a constant here. */
 static void put_rgb_v4_header(unsigned char *p, size_t len, const int created[6],
-    int32_t version)
+    int32_t version, int lowercaseManufacturer)
 {
     put_icc_header(p, len, created, version, "RGB ");
+    /* Most profiles here give their manufacturer as the four upper-case bytes
+       the CMM signature uses, and three give the same four characters lower
+       case.  Nothing about the format requires either, and the two spellings
+       are 0x20 apart in one header field, so the row says which it wants. */
+    if (lowercaseManufacturer)
+        memcpy(p + 48, "appl", 4);
 }
 
 /* Assemble the profile for one of these spaces.  The blocks are laid out one
@@ -1397,19 +1604,29 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
        header records and the table written below cannot come apart. */
     const char *name[CGICCRGBV4MaxTags];
     int block[CGICCRGBV4MaxTags];
-    int n = 0, i;
+    int n = 0, i, k;
 
-    /* The first six blocks are the six fixed tags, in the same order. */
+    /* The first six blocks are the six fixed tags, in the same order -- except
+       that a row putting its constant tags after the description has the first
+       of them next, before the copyright rather than among the rest. */
     for (i = 0; i < CGICCRGBV4FixedTags; i++) {
         name[n] = fixed[i];
         block[n] = i;
         n++;
+        if (i == desc && v->extrasWhere == CGICCRGBV4ExtrasAfterDesc) {
+            for (k = 0; k < v->extraCount; k++) {
+                name[n] = v->extraName[k];
+                block[n++] = extra + k;
+            }
+        }
     }
     name[n] = trcOrder[v->trcOwner][0];
     block[n++] = curve;
-    for (i = 0; i < v->extraCount; i++) {
-        name[n] = v->extraName[i];
-        block[n++] = extra + i;
+    if (v->extrasWhere == CGICCRGBV4ExtrasAfterCurve) {
+        for (i = 0; i < v->extraCount; i++) {
+            name[n] = v->extraName[i];
+            block[n++] = extra + i;
+        }
     }
     if (!v->omitChad) {
         name[n] = "chad";
@@ -1428,7 +1645,8 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
        either case the two lengths are worked out here rather than written
        down. */
     if (v->legacyStrings) {
-        dlen = 12 + (strlen(v->desc) + 1) + 4 + 4 + 2 + 67 + 1;
+        dlen = 12 + (strlen(v->desc) + 1) + 4 + 4 + 2
+            + (v->descScriptCode ? 1 : 0) + 67 + 1;
         clen = 8 + strlen(v->cprt) + 1;
     } else {
         dlen = 28 + 2 * strlen(v->desc);
@@ -1443,6 +1661,18 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
     tagLen[desc] = (int32_t)dlen;
     tagOff[desc] = (int32_t)icc_pad(len);
     len = icc_pad(len) + dlen;
+    /* The blocks are laid out in the order the tag table lists them, so a row
+       putting its constant tags after the description has them take their
+       offsets here rather than below. */
+    if (v->extrasWhere == CGICCRGBV4ExtrasAfterDesc) {
+        for (i = 0; i < v->extraCount; i++) {
+            size_t elen = put_extra_tag(NULL, v, i);
+
+            tagLen[extra + i] = (int32_t)elen;
+            tagOff[extra + i] = (int32_t)icc_pad(len);
+            len = icc_pad(len) + elen;
+        }
+    }
     tagLen[cprt] = (int32_t)clen;
     tagOff[cprt] = (int32_t)icc_pad(len);
     len = icc_pad(len) + clen;
@@ -1454,12 +1684,16 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
     tagLen[curve] = (int32_t)tlen;
     tagOff[curve] = (int32_t)icc_pad(len);
     len = icc_pad(len) + tlen;
-    /* The constant tags sit between the first curve and 'chad', which is where
-       the one profile carrying them lists them. */
-    for (i = 0; i < v->extraCount; i++) {
-        tagLen[extra + i] = v->extraLen[i];
-        tagOff[extra + i] = (int32_t)icc_pad(len);
-        len = icc_pad(len) + v->extraLen[i];
+    /* Or between the first curve and 'chad', which is where CoreMedia709 lists
+       its two. */
+    if (v->extrasWhere == CGICCRGBV4ExtrasAfterCurve) {
+        for (i = 0; i < v->extraCount; i++) {
+            size_t elen = put_extra_tag(NULL, v, i);
+
+            tagLen[extra + i] = (int32_t)elen;
+            tagOff[extra + i] = (int32_t)icc_pad(len);
+            len = icc_pad(len) + elen;
+        }
     }
     if (!v->omitChad) {
         tagLen[chad] = CGICCRGBV4ChadLength;
@@ -1483,7 +1717,8 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
     if (!p)
         return NULL;
 
-    put_rgb_v4_header(p, len, v->created, v->version ? v->version : CGICCVersionV4);
+    put_rgb_v4_header(p, len, v->created, v->version ? v->version : CGICCVersionV4,
+        v->lowercaseManufacturer);
     put_be32(p + CGICCTagCountOffset, (uint32_t)n);
 
     for (i = 0; i < n; i++) {
@@ -1495,7 +1730,7 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
     }
 
     if (v->legacyStrings) {
-        put_desc(p + tagOff[desc], v->desc);
+        put_desc(p + tagOff[desc], v->desc, v->descScriptCode);
         put_text(p + tagOff[cprt], v->cprt);
     } else {
         put_mluc(p + tagOff[desc], v->desc);
@@ -1506,7 +1741,7 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
         put_xyz_i32(p + tagOff[rXYZ + i], v->colorants + 3 * i);
     put_icc_curve(p + tagOff[curve], &v->trc);
     for (i = 0; i < v->extraCount; i++)
-        memcpy(p + tagOff[extra + i], v->extraData[i], v->extraLen[i]);
+        put_extra_tag(p + tagOff[extra + i], v, i);
     if (!v->omitChad)
         put_chad(p + tagOff[chad], v->chad);
     if (v->cicp)
@@ -1696,11 +1931,11 @@ static const unsigned char CoreMedia709NDIN[62] = {
     0x00, 0x00,
 };
 
-/* CoreMedia709 is the seventeenth profile on this template, and one of two that
-   are not v4: its header declares v2.1, which is why it carries the legacy
-   'desc' and 'text' strings rather than 'mluc', and it is the only one with two
-   tags in the middle of the table.  Its white point is not quantised to the
-   value the others share, and its copyright is the one of the eighteen that
+/* CoreMedia709 is one of three profiles on this template that are not v4: its
+   header declares v2.1, which is why it carries the legacy 'desc' and 'text'
+   strings rather than 'mluc', and it is the only one with two tags in the
+   middle of the table.  Its white point is not quantised to the
+   value the others share, and its copyright is the one of the nineteen that
    does not follow the 'Copyright Apple Inc., <year>' form.
 
    What it does share is worth as much: the BT.709 colorants to the last bit,
@@ -1724,10 +1959,10 @@ static const struct cgs_rgb_v4 CoreMedia709 = {
     .extraCount = 2,
 };
 
-/* GenericRGBLinear is the eighteenth profile on this template and the second of
-   the two that are not v4, so it shares CoreMedia709's legacy string types
-   rather than the v4 'mluc' records, and it is the only profile here carrying
-   no 'chad' at all -- nine tags where CoreMedia709 has twelve.  Its creation
+/* GenericRGBLinear is the second of the three profiles here that are not v4,
+   and shares CoreMedia709's legacy string types rather than the v4 'mluc'
+   records.  It is the only profile on this template carrying no 'chad' at all
+   -- nine tags where CoreMedia709 has twelve.  Its creation
    date is the most recent of any profile in this file, 2025 against the 2023 of
    the BT.2020 space next door, and its copyright follows the
    'Copyright Apple Inc., <year>' form every profile but CoreMedia709 uses.
@@ -1743,9 +1978,9 @@ static const struct cgs_rgb_v4 CoreMedia709 = {
    which is not the direction the name alone would suggest -- and which is still
    not far enough for Apple to call either of them wide gamut.
 
-   Its white point is the header illuminant itself, one of two values the
-   template uses, where CoreMedia709's is quantised somewhere else entirely.
-   All three tone curves share one block. */
+   Its white point is the header illuminant itself, one of three values the
+   template uses, where CoreMedia709's and GenericRGB's are quantised
+   somewhere else entirely.  All three tone curves share one block. */
 static const struct cgs_rgb_v4 GenericRGBLinear = {
     .desc = "Generic RGB Linear Profile",
     .version = CGICCVersionV21,
@@ -1758,16 +1993,102 @@ static const struct cgs_rgb_v4 GenericRGBLinear = {
     .omitChad = 1,
 };
 
-/* The eighteen names those thirteen profiles answer to, and the space each one
+/* GenericRGB is the last of the fourteen profiles on this template and the
+   only one at v2.2 -- a version that differs from v2.1 in nothing this file
+   writes, since both carry the legacy string types, but that the header
+   records separately.
+
+   Three things about it are unlike any of the others.  It is the only profile
+   whose description is a translation list rather than a single en-US string:
+   'dscm' is an 'mluc' of thirty-one languages, and every other 'mluc' here is
+   one record long.  Its constant tag comes second, straight after the
+   description, where CoreMedia709's two come after the first tone curve.  And
+   it is the only one to spell its manufacturer lower case, which is one header
+   field and one row flag between them.
+
+   Its white point is a D65 quantised to 0xf352 and 0x116cf.  The rest of the
+   template splits between 0xf6d5 and 0xd32c, which is the same illuminant
+   quantised down, and the header's own 0xf6d6 and 0xd32d; CoreMedia709 has the
+   same pair as this one one unit off in each direction, at 0xf351 and 0x116cc,
+   which is why the two look like the same measurement taken twice.  Its
+   Bradford inverse is the shared matrix with three of its nine words off by
+   one: 0xfd90 and 0xc06e becoming 0xfd91 and 0xc06c, and 0x793 becoming 0x792.
+   Close enough to look like a transcription error, and not one -- which is why
+   the words are copied rather than computed from the colorants, as everything
+   else here is.
+
+   What it shares with GenericRGBLinear is the colorants to the first and
+   second words of red and green, 0x744d and 0x3dee, 0x5a75 and 0xac73; the two
+   spaces differ in the rest, and the gamma here is 461/256 rather than the
+   identity the linear one carries. */
+static const struct cgs_mluc_record GenericRGBDscm[31] = {
+    /* Slovak first and Arabic last, with nothing in between sorted: the order
+       is Apple's own and is reproduced as found.  Two entries repeat an
+       earlier string rather than carrying a second copy of it -- svSE after
+       nbNO and esES after ptPO -- which put_mluc_records finds by comparing
+       the text. */
+    { "skSK", "Všeobecný RGB profil" },
+    { "daDK", "Generel RGB-profil" },
+    { "caES", "Perfil RGB genèric" },
+    { "viVN", "Cấu hình RGB Chung" },
+    { "ptBR", "Perfil RGB Genérico" },
+    { "ukUA", "Загальний профайл RGB" },
+    { "frFU", "Profil générique RVB" },
+    { "huHU", "Általános RGB profil" },
+    { "zhTW", "通用RGB色彩描述" },
+    { "koKR", "일반 RGB 프로파일" },
+    { "nbNO", "Generisk RGB-profil" },
+    { "csCZ", "Obecný RGB profil" },
+    { "heIL", "פרופיל RGB כללי" },
+    { "roRO", "Profil RGB generic" },
+    { "deDE", "Allgemeines RGB-Profil" },
+    { "itIT", "Profilo RGB generico" },
+    { "svSE", "Generisk RGB-profil" },
+    { "zhCN", "普通RGB描述文件" },
+    { "jaJP", "一般 RGB プロファイル" },
+    { "elGR", "Γενικό προφίλ RGB" },
+    { "ptPO", "Perfil RGB genérico" },
+    { "nlNL", "Algemeen RGB-profiel" },
+    { "esES", "Perfil RGB genérico" },
+    { "thTH", "โปรไฟล์ RGB ทั่วไป" },
+    { "trTR", "Genel RGB Profili" },
+    { "fiFI", "Yleinen RGB-profiili" },
+    { "hrHR", "Generički RGB profil" },
+    { "plPL", "Uniwersalny profil RGB" },
+    { "ruRU", "Общий профиль RGB" },
+    { "enUS", "Generic RGB Profile" },
+    { "arEG", "ملف تعريف RGB العام" }
+};
+
+static const struct cgs_rgb_v4 GenericRGB = {
+    .desc = "Generic RGB Profile",
+    .version = CGICCVersionV22,
+    .legacyStrings = 1,
+    .descScriptCode = 1,
+    .lowercaseManufacturer = 1,
+    .created = { 2009, 2, 25, 11, 26, 11 },
+    .cprt = "Copyright 2007 Apple Inc., all rights reserved.",
+    .wtpt = { 0xf352, 0x10000, 0x116cf },
+    .colorants = { 0x744d, 0x3dee, 0x3d0, 0x5a75, 0xac73, 0x1734, 0x281a, 0x159f, 0xb836 },
+    .trc = { 0, 0, 461, 0, { 0x0 } },  /* u8Fixed8 gamma, 461/256 */
+    .chad = { 0x10c42, 0x5de, -0xcda, 0x792, 0xfd91, -0x45e, -0x25d, 0x3dc, 0xc06c },
+    .extraName = { "dscm" },
+    .extraRecords = { GenericRGBDscm },
+    .extraRecordCount = { 31 },
+    .extraCount = 1,
+    .extrasWhere = CGICCRGBV4ExtrasAfterDesc,
+};
+
+/* The nineteen names those fourteen profiles answer to, and the space each one
    builds.  An extended-range name takes the same profile bytes as its base --
    the profile carries no range, and the two spaces are reported unequal
    because the flag below is what differs -- so it is the name and the flag that
    are per-space rather than the profile.
 
-   Every one of the eighteen is an immortal singleton: two calls answer the same
+   Every one of the nineteen is an immortal singleton: two calls answer the same
    pointer at the immortal retain count, exactly as the device names do.  So
    each row is built on first use and then kept. */
-enum { CGColorSpaceNamedRGBV4Count = 18 };
+enum { CGColorSpaceNamedRGBV4Count = 19 };
 
 static const struct {
     const char *name;
@@ -1785,6 +2106,7 @@ static const struct {
     { "kCGColorSpaceDCIP3", &DCIP3, false },
     { "kCGColorSpaceACESCGLinear", &ACESCGLinear, false },
     { "kCGColorSpaceCoreMedia709", &CoreMedia709, false },
+    { "kCGColorSpaceGenericRGB", &GenericRGB, false },
     { "kCGColorSpaceGenericRGBLinear", &GenericRGBLinear, false },
     { "kCGColorSpaceLinearSRGB", &LinearSRGB, false },
     { "kCGColorSpaceExtendedLinearSRGB", &LinearSRGB, true },
@@ -1796,9 +2118,9 @@ static const struct {
 
 static struct CGColorSpace *CGColorSpaceNamedRGBV4State[CGColorSpaceNamedRGBV4Count];
 
-/* Build, or find, the space one of the sixteen v4 names resolves to.  Answers
-   NULL for every other name, so the caller can hand it the name it failed to
-   recognise and get the same answer back. */
+/* Build, or find, the space one of the nineteen names on this template
+   resolves to.  Answers NULL for every other name, so the caller can hand it
+   the name it failed to recognise and get the same answer back. */
 static CGColorSpaceRef CGColorSpaceCreateNamedRGBV4(CFStringRef name)
 {
     struct CGColorSpace *s;
@@ -1919,7 +2241,9 @@ static unsigned char *put_gray_v2(const struct cgs_gray_v2 *v, size_t *outLen)
         put_be32(e + 8, tagLen[i]);
     }
 
-    put_desc(p + tagOff[desc], v->desc);
+    /* The gray template has one description and it takes the empty ScriptCode
+       form, which put_desc writes when told not to fill it. */
+    put_desc(p + tagOff[desc], v->desc, 0);
     put_text(p + tagOff[cprt], v->cprt);
     put_xyz_i32(p + tagOff[wtpt], v->wtpt);
     put_icc_curve(p + tagOff[curve], &v->trc);
@@ -2748,7 +3072,7 @@ static unsigned char *put_hdr(const struct cgs_hdr *v, const int32_t *matrix,
     if (!p)
         return NULL;
 
-    put_rgb_v4_header(p, len, v->created, CGICCVersionV4);
+    put_rgb_v4_header(p, len, v->created, CGICCVersionV4, 0);
     put_be32(p + CGICCTagCountOffset, (uint32_t)CGICCHDRTagCount);
     for (i = 0; i < CGICCHDRTagCount; i++) {
         unsigned char *e = p + CGICCTagTableOffset + i * CGICCTagEntrySize;

@@ -2824,6 +2824,17 @@ int main(void)
                    here carrying no 'chad' at all, so nine tags where the rest
                    have ten to twelve. */
                 "kCGColorSpaceGenericRGBLinear",
+                /* The generic RGB space its linearized counterpart is named
+                   for.  Its colorants are the same primaries in the same
+                   numbers, so it differs from that profile only in the gamma
+                   written on its curve, and both report the same type: a
+                   three-component ICC space, neither wide gamut nor extended,
+                   since the primaries are Rec. 709.  The one thing its header
+                   gives no hint of is that it is the largest profile in the
+                   set -- its 'dscm' translation list is four times the size of
+                   CoreMedia709's whole profile, which is why the size recorded
+                   below is not an outlier to shrug at. */
+                "kCGColorSpaceGenericRGB",
                 /* The six HDR profiles, which between them carry eight names:
                    the PQ and HLG variants of the Display P3, 709 and 2020
                    primaries.  None of the eight carries the extended flag,
@@ -2941,6 +2952,7 @@ int main(void)
                    and still short of wide, which the recorded row makes
                    explicit rather than leaving to be inferred. */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 0 },        /* GenericRGBLinear */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 0 },        /* GenericRGB */
                 /* The six HDR spaces, one row per profile.  Each is a three-
                    component ICC space of the same type as the v4 ones, none is
                    extended, and the wide answer follows the primaries rather
