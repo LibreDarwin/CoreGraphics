@@ -99,11 +99,11 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
 
    The names that resolve here are of two kinds.  Five need no profile of
    their own -- the three device names, kCGColorSpaceColoredPattern and
-   kCGColorSpaceGenericLab -- and the twenty-six described below are assembled
+   kCGColorSpaceGenericLab -- and the twenty-eight described below are assembled
    from recovered constants.  Every other name yields NULL, because it resolves
    to a space carrying an embedded profile this step cannot emit yet.  That set
-   is neither the identifier table nor a subset of it: of the 45 name constants
-   reachable through the API, 40 resolve and 5 return NULL, and eight of the
+   is neither the identifier table nor a subset of it: of the 50 name constants
+   reachable through the API, 44 resolve and 6 return NULL, and eight of the
    resolving names are absent from the table that CGColorSpaceIDFromName and
    CGColorSpaceNameFromID use.  So this accepts names that have no identifier,
    and refuses names that do.
@@ -123,18 +123,21 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
    recovered constants rather than computed, and each is byte-for-byte what
    Apple hands back -- 536 to 600 bytes depending on the space.
 
-   Eight further names resolve to six HDR profiles: the PQ and HLG variants of
+   Ten further names resolve to six HDR profiles: the PQ and HLG variants of
    the Display P3, Rec. ITU-R BT.709-5 and BT.2100 primaries, from 7,156 to
    13,332 bytes.  They are byte-for-byte what Apple hands back, built from one
    shared template whose only per-space parts are the description, the 'cicp'
    coding and the reference luminance.  Two things are worth knowing about
-   them.  Each is an immortal singleton, as the others are; and
-   kCGColorSpaceITUR_2020_PQ and kCGColorSpaceITUR_2100_PQ are one space under
-   two names rather than two spaces, as are the HLG pair.  Asking for either
-   2020 spelling answers the same pointer as the 2100 one and reports the
-   2100 name.
+   them.  Each is an immortal singleton, as the others are; and four of the ten
+   are second names for a space that already exists rather than spaces of their
+   own.  Asking for kCGColorSpaceITUR_2020_PQ or kCGColorSpaceITUR_2100_PQ
+   answers the same pointer and reports the 2100 name, as the HLG pair does, and
+   the two EOTF spellings are aliases the same way:
+   kCGColorSpaceDisplayP3_PQ_EOTF answers the Display P3 PQ space and reports
+   its name, and kCGColorSpaceITUR_2020_PQ_EOTF answers the BT.2100 PQ space
+   and reports the 2100 name.  So ten names build six spaces.
 
-   Those eight need the primaries recorded beside the profile rather than read
+   Those six spaces need the primaries recorded beside the profile rather than read
    out of it.  An HDR profile names its primaries in its description and then
    stores no colorants at all -- what it holds instead is a lut16Type whose
    matrix is not the primaries even up to scale -- so the measured triangle

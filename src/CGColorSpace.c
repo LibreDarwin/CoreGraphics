@@ -225,7 +225,7 @@ static CGColorSpaceRef CGColorSpaceCreateNamedRGBV4(CFStringRef name);
    profile of a rather different shape. */
 static CGColorSpaceRef CGColorSpaceCreateNamedGrayV2(CFStringRef name);
 
-/* And for the eight HDR names, which resolve to six profiles of a third shape:
+/* And for the ten HDR names, which resolve to six profiles of a third shape:
    the PQ and HLG variants of the Display P3, Rec. ITU-R BT.709 and Rec. ITU-R
    BT.2100 primaries. */
 static CGColorSpaceRef CGColorSpaceCreateNamedHDR(CFStringRef name);
@@ -246,7 +246,11 @@ static CGColorSpaceRef CGColorSpaceCreateNamedHDR(CFStringRef name);
    CGColorSpaceIDFromName does is an exact string match, not a prefix and
    not a case-insensitive one: "kCGColorSpaceSRGB" resolves, while "sRGB",
    "CGColorSpace sRGB", "P3" and the empty string do not, and neither do the
-   three device space names. */
+   three device space names.
+
+   The four second spellings below are not in this table, because
+   CGColorSpaceNameFromID never hands one back; they are matched by
+   CGColorSpaceIDFromName alone. */
 static const char *const CGColorSpaceBuiltInNames[] = {
     NULL,                               /* 0: not a valid identifier */
     "kCGColorSpaceGenericGrayGamma2_2",  /* 1 */
@@ -285,6 +289,30 @@ static const char *const CGColorSpaceBuiltInNames[] = {
 
 #define CG_COLORSPACE_BUILT_IN_COUNT \
     ((int)(sizeof CGColorSpaceBuiltInNames / sizeof CGColorSpaceBuiltInNames[0]))
+
+/* Second spellings that CGColorSpaceIDFromName answers with an identifier even
+   though the name itself is not one of the entries above.  Each of the four is
+   another name for a space the table already carries under a sibling spelling,
+   and each answers with that sibling's identifier rather than with one of its
+   own: the 2020 PQ and HLG names reach the identifiers the table files under
+   the 2100 spellings, and the two EOTF names reach the identifiers of the PQ
+   spaces they are EOTF spellings of.
+
+   Recovered by reading CGColorSpaceIDFromName over every constant reachable
+   through the API and keeping the names that answered with an identifier they
+   are not filed under.  The four are the only such names. */
+static const struct {
+    const char *name;
+    int id;
+} CGColorSpaceBuiltInAliases[] = {
+    { "kCGColorSpaceITUR_2020_PQ", 28 },
+    { "kCGColorSpaceITUR_2020_HLG", 29 },
+    { "kCGColorSpaceDisplayP3_PQ_EOTF", 11 },
+    { "kCGColorSpaceITUR_2020_PQ_EOTF", 28 }
+};
+
+#define CG_COLORSPACE_BUILT_IN_ALIAS_COUNT \
+    ((int)(sizeof CGColorSpaceBuiltInAliases / sizeof CGColorSpaceBuiltInAliases[0]))
 
 /* Compare a CFString against an ASCII table entry.  The table is ASCII, so
    this builds the CFString and does a byte compare rather than going
@@ -401,16 +429,21 @@ CGColorSpaceRef CGColorSpaceCreatePattern(CGColorSpaceRef baseSpace)
 
    A NULL name and the empty string both return NULL rather than faulting.
 
-   Five of the forty-five name constants resolve here.  The identifier table is
-   not the set of names this accepts and is not even most of it: sweeping every
-   constant reachable through the API gives 45 distinct names, of which the
-   table's 32 all resolve, eight more resolve with no identifier at all, and
-   five return NULL (Unnamed, Invalid, and the three legacy GenericGamma2_2 /
-   GenericCMYKLinear spellings).  Those eight are the three device names, the
-   four generic profiles the table omits, and ColoredPattern -- so a lookup
-   built from the identifier table alone would refuse eight names Apple
-   accepts, among them kCGColorSpaceGenericGray, which reads as identifier 0
-   and so is indistinguishable from a name Apple has never heard of.
+   Thirty-three of the fifty name constants resolve here, where Apple resolves
+   forty-four.  The identifier table is not the set of names this accepts and is
+   not even most of it: sweeping every constant reachable through the API gives
+   50 distinct names, of which Apple's 44 resolve and six return NULL.  Of those
+   44, the table's 32 all resolve under their own names, eight more resolve with
+   no identifier at all, and four are second spellings that reach an identifier
+   through a sibling -- the 2020 PQ and HLG names, and the two EOTF names.  The
+   six that return NULL are Pattern, Unnamed, Invalid, and the three legacy
+   GenericGamma2_2 / GenericCMYKLinear spellings.  The eight with no identifier
+   are the three device names, the four generic profiles the table omits, and
+   ColoredPattern -- so a lookup built from the identifier table alone would
+   refuse eight names Apple accepts, among them kCGColorSpaceGenericGray, which
+   reads as identifier 0 and so is indistinguishable from a name Apple has never
+   heard of.  The eleven names this step still refuses are the ones carrying a
+   profile it cannot emit yet.
 
    The three device names resolve to the file-scope singletons, so the named
    space and the CreateDeviceX() space are one object: both return the same
@@ -1908,7 +1941,7 @@ CGColorSpaceRef CGColorSpaceCreateCalibratedRGB(const CGFloat
     return s;
 }
 
-/* The eight HDR spaces: four primaries, each in a perceptual quantizer and a
+/* The six HDR spaces: three primaries, each in a perceptual quantizer and a
    hybrid log-gamma one.
 
    These are a third template rather than a variant of either of the two above.
@@ -1920,7 +1953,7 @@ CGColorSpaceRef CGColorSpaceCreateCalibratedRGB(const CGFloat
    than parameters.  'mBA ' is 'mAB ' with the two ends swapped, so one emitter
    serves both and the tag signature is their only difference.
 
-   Everything that varies across the eight was recovered by comparing the eight
+   Everything that varies across the six was recovered by comparing the six
    profiles against each other, and the sharing between them is what keeps these
    tables as small as they are.  The sixteen lut tags hold four distinct sampled
    curves -- one per family and direction -- because the curve follows the
@@ -1929,7 +1962,7 @@ CGColorSpaceRef CGColorSpaceCreateCalibratedRGB(const CGFloat
    six pairs, and a PQ profile and its HLG counterpart share theirs exactly.
    The M curves and the CLUT vary by family and direction but not by primaries
    either, so four of each cover all sixteen tags.  'wtpt' and 'chad' are the
-   same in all eight and are written from the values the v4 rows above already
+   same in all six and are written from the values the v4 rows above already
    carry.  Only 'desc', 'cicp' and 'lumi' are per-space.
 
    The sampled curves are the one part of this template that is stored data
@@ -2606,22 +2639,27 @@ static const struct cgs_hdr DisplayP3_HLG = {
     .primaries = { 0x83df, 0x3dbf, -0x45, 0x4abf, 0xb137, 0xab9, 0x2838, 0x110b, 0xc8b9 }
 };
 
-/* The eight names, and the space each one builds.  They are immortal
+/* The ten names, and the space each one builds.  They are immortal
    singletons, as every other named space in this file is: two calls answer the
    same pointer at the immortal retain count.
 
-   Six of the eight build six spaces rather than eight, because the 2020 and the
-   2100 spelling of each family are one space and not two.  Asking for the 2020
-   name hands back the very pointer the 2100 name does and reports that name,
-   so the second spelling is a second name rather than a second space -- which
-   is why the reported column differs from the name column on those rows and why
-   the slot column repeats.
+   Six of the ten build six spaces rather than ten.  Four of the ten are second
+   spellings of a space that already exists: the 2020 and the 2100 spelling of
+   each HDR family are one space and not two, and the two EOTF spellings are
+   likewise another name for a PQ space rather than a space of their own.
+   Asking for any of those hands back the very pointer its sibling answers and
+   reports the sibling's name, which is why the reported column differs from
+   the name column on those rows and why the slot column repeats.
 
    Unlike the v4 table these rows carry no extended flag, because none of the
-   eight names is an extended-range alias of another. */
+   ten names is an extended-range alias of another. */
 enum {
-    CGColorSpaceNamedHDRCount = 8,
-    /* One per profile, so the two 2020 rows and the two 2100 rows share one. */
+    /* Ten names over six profiles.  The two extra rows are the EOTF spellings
+       of the two PQ spaces, which Apple treats exactly like the 2100 pair:
+       another spelling of a space that already exists, so it shares the slot
+       and reports the name that names it. */
+    CGColorSpaceNamedHDRCount = 10,
+    /* One per profile, so the rows sharing a space share one. */
     CGColorSpaceNamedHDRSlots = 6
 };
 
@@ -2634,17 +2672,19 @@ static const struct {
 } CGColorSpaceNamedHDR[CGColorSpaceNamedHDRCount] = {
     { "kCGColorSpaceITUR_2020_PQ", "kCGColorSpaceITUR_2100_PQ", &ITUR_2020_PQ, cgsHdrMatrix2020, 0 },
     { "kCGColorSpaceITUR_2100_PQ", "kCGColorSpaceITUR_2100_PQ", &ITUR_2020_PQ, cgsHdrMatrix2020, 0 },
+    { "kCGColorSpaceITUR_2020_PQ_EOTF", "kCGColorSpaceITUR_2100_PQ", &ITUR_2020_PQ, cgsHdrMatrix2020, 0 },
     { "kCGColorSpaceITUR_2020_HLG", "kCGColorSpaceITUR_2100_HLG", &ITUR_2020_HLG, cgsHdrMatrix2020, 1 },
     { "kCGColorSpaceITUR_2100_HLG", "kCGColorSpaceITUR_2100_HLG", &ITUR_2020_HLG, cgsHdrMatrix2020, 1 },
     { "kCGColorSpaceITUR_709_PQ", "kCGColorSpaceITUR_709_PQ", &ITUR_709_PQ, cgsHdrMatrix709, 2 },
     { "kCGColorSpaceITUR_709_HLG", "kCGColorSpaceITUR_709_HLG", &ITUR_709_HLG, cgsHdrMatrix709, 3 },
     { "kCGColorSpaceDisplayP3_PQ", "kCGColorSpaceDisplayP3_PQ", &DisplayP3_PQ, cgsHdrMatrixP3, 4 },
+    { "kCGColorSpaceDisplayP3_PQ_EOTF", "kCGColorSpaceDisplayP3_PQ", &DisplayP3_PQ, cgsHdrMatrixP3, 4 },
     { "kCGColorSpaceDisplayP3_HLG", "kCGColorSpaceDisplayP3_HLG", &DisplayP3_HLG, cgsHdrMatrixP3, 5 }
 };
 
 static struct CGColorSpace *CGColorSpaceNamedHDRState[CGColorSpaceNamedHDRSlots];
 
-/* Build, or find, the space one of the eight HDR names resolves to.  Answers NULL
+/* Build, or find, the space one of the ten HDR names resolves to.  Answers NULL
    for every other name, so the caller can hand it the name it failed to
    recognise and get the same answer back. */
 static CGColorSpaceRef CGColorSpaceCreateNamedHDR(CFStringRef name)
@@ -3941,6 +3981,10 @@ int CGColorSpaceIDFromName(CFStringRef name)
     for (i = 1; i < CG_COLORSPACE_BUILT_IN_COUNT; i++) {
         if (CGColorSpaceNameEqualsASCII(name, CGColorSpaceBuiltInNames[i]))
             return i;
+    }
+    for (i = 0; i < CG_COLORSPACE_BUILT_IN_ALIAS_COUNT; i++) {
+        if (CGColorSpaceNameEqualsASCII(name, CGColorSpaceBuiltInAliases[i].name))
+            return CGColorSpaceBuiltInAliases[i].id;
     }
     return 0;
 }

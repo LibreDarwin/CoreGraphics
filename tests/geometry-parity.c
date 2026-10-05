@@ -2715,6 +2715,15 @@ int main(void)
                 "kCGColorSpaceROMMRGB",
                 "kCGColorSpaceDCIP3",
                 "kCGColorSpaceCoreMedia709",
+                /* The four second spellings, which answer with an identifier
+                   they are not filed under: the 2020 PQ and HLG names reach
+                   the 2100 identifiers, and the two EOTF names reach the PQ
+                   identifiers they are spellings of.  None of them round-trips,
+                   since CGColorSpaceNameFromID hands back the sibling name. */
+                "kCGColorSpaceITUR_2020_PQ",
+                "kCGColorSpaceITUR_2020_HLG",
+                "kCGColorSpaceDisplayP3_PQ_EOTF",
+                "kCGColorSpaceITUR_2020_PQ_EOTF",
             };
             const size_t nn = sizeof names / sizeof names[0];
 
@@ -2816,6 +2825,12 @@ int main(void)
                 "kCGColorSpaceITUR_709_HLG",
                 "kCGColorSpaceDisplayP3_PQ",
                 "kCGColorSpaceDisplayP3_HLG",
+                /* And two more second spellings, which behave the same way:
+                   each EOTF name answers the very pointer its non-EOTF sibling
+                   does and reports the sibling's name, so these ten names
+                   build six spaces. */
+                "kCGColorSpaceDisplayP3_PQ_EOTF",
+                "kCGColorSpaceITUR_2020_PQ_EOTF",
             };
             /* Names Apple itself refuses, so the NULL is a shared answer
                rather than this step's gap.  Unnamed and Invalid are the two
@@ -2910,6 +2925,10 @@ int main(void)
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 0 },        /* ITUR_709_HLG */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* DisplayP3_PQ */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* DisplayP3_HLG */
+                /* The EOTF spellings take their sibling's row for the same
+                   reason the 2100 spellings do. */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* DisplayP3_PQ_EOTF */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* ITUR_2020_PQ_EOTF */
             };
             size_t i;
 
@@ -2965,7 +2984,7 @@ int main(void)
                 }
                 CFRelease(s);
             }
-            /* The two 2020/2100 pairs are one space under two names, which
+            /* These four pairs are one space under two names, which
                the per-name lines above cannot show: each answers its own
                stability check, so both spellings are stable without either
                revealing that they are stable as the same object.  Asking for
@@ -2975,9 +2994,12 @@ int main(void)
                 static const char *const pairs[][2] = {
                     { "kCGColorSpaceITUR_2020_PQ", "kCGColorSpaceITUR_2100_PQ" },
                     { "kCGColorSpaceITUR_2020_HLG", "kCGColorSpaceITUR_2100_HLG" },
+                    { "kCGColorSpaceDisplayP3_PQ_EOTF", "kCGColorSpaceDisplayP3_PQ" },
+                    { "kCGColorSpaceITUR_2020_PQ_EOTF", "kCGColorSpaceITUR_2020_PQ" },
                 };
-                static const char *const reported[2] = {
+                static const char *const reported[4] = {
                     "kCGColorSpaceITUR_2100_PQ", "kCGColorSpaceITUR_2100_HLG",
+                    "kCGColorSpaceDisplayP3_PQ", "kCGColorSpaceITUR_2100_PQ",
                 };
                 const size_t np = sizeof pairs / sizeof pairs[0];
 
@@ -2989,18 +3011,18 @@ int main(void)
                     CGColorSpaceRef ra = CGColorSpaceCreateWithName(a);
                     CGColorSpaceRef rb = CGColorSpaceCreateWithName(bstr);
 
-                    /* Both spellings in one label would run to
+/* Both spellings in one label would run to
                        "nm/kCGColorSpaceITUR_2020_HLG/kCGColorSpaceITUR_2100_HLG",
                        which does not fit the 64 bytes every label here has,
-                       so the pair is named by its 2020 half. */
+                       so the pair is named by its first half. */
                     snprintf(l, sizeof l, "nm/%s/pair_same", pairs[i][0]);
                     b(l, ra == rb);
-                    /* And the pair reports the 2100 spelling under both
+                    /* And the pair reports the sibling's spelling under both
                        names, so the name is a property of the space rather
                        than of the lookup. */
                     snprintf(l, sizeof l, "nm/%s/pair_name", pairs[i][0]);
                     cfstr(l, CGColorSpaceCopyName(ra));
-                    snprintf(l, sizeof l, "nm/%s/pair_name_is_2100",
+                    snprintf(l, sizeof l, "nm/%s/pair_reported_is",
                         pairs[i][0]);
                     {
                         /* Compared as ASCII: cfstr above already records the
