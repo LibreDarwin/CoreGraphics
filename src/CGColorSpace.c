@@ -429,7 +429,7 @@ CGColorSpaceRef CGColorSpaceCreatePattern(CGColorSpaceRef baseSpace)
 
    A NULL name and the empty string both return NULL rather than faulting.
 
-   Thirty-three of the fifty name constants resolve here, where Apple resolves
+   Thirty-four of the fifty name constants resolve here, where Apple resolves
    forty-four.  The identifier table is not the set of names this accepts and is
    not even most of it: sweeping every constant reachable through the API gives
    50 distinct names, of which Apple's 44 resolve and six return NULL.  Of those
@@ -442,7 +442,7 @@ CGColorSpaceRef CGColorSpaceCreatePattern(CGColorSpaceRef baseSpace)
    ColoredPattern -- so a lookup built from the identifier table alone would
    refuse eight names Apple accepts, among them kCGColorSpaceGenericGray, which
    reads as identifier 0 and so is indistinguishable from a name Apple has never
-   heard of.  The eleven names this step still refuses are the ones carrying a
+   heard of.  The ten names this step still refuses are the ones carrying a
    profile it cannot emit yet.
 
    The three device names resolve to the file-scope singletons, so the named
@@ -607,6 +607,10 @@ enum {
     /* The rest of the header that CGColorSpaceCreateWithICCData reads. */
     CGICCProfileSizeOffset = 0,
     CGICCVersionOffset = 8,
+    /* The two versions the profiles here declare: v2.1 for the two that predate
+       the multi-localized string types, v4 for the rest. */
+    CGICCVersionV21 = 0x02100000,
+    CGICCVersionV4 = 0x04000000,
     CGICCDeviceClassOffset = 12,
     CGICCSignatureOffset = 36,
     CGICCTagEntrySize = 12,
@@ -1104,11 +1108,23 @@ static void put_xyz_i32(unsigned char *p, const int32_t v[3])
    OETF variant, which lists blue first -- a difference in the tag table
    alone, invisible in the bytes the two curves would have had. */
 enum {
-    /* Ten tags without the coding tag, eleven with it.  The table starts at
-       132 and every entry is twelve bytes, so the data offset follows from
-       the count rather than being fixed. */
-    CGICCRGBV4TagCount = 10,
-    CGICCRGBV4CicpTagCount = 11,
+    /* The tag table's order is built one entry at a time below rather than
+       counted from the loop index, because three separate things move it: the
+       component that owns the shared curve block, whether the coding tag is
+       present, and how many constant tags sit in the middle.  So the count
+       recorded in the header is whatever that build produced -- ten without a
+       coding tag, eleven with one, twelve for the space carrying two tags of
+       its own.  What the table needs is an upper bound, and the widest case is
+       every kind at once: six fixed tags, three tone curves, 'chad', 'cicp',
+       and both constant tags. */
+    CGICCRGBV4FixedTags = 6,    /* desc, cprt, wtpt, rXYZ, gXYZ, bXYZ */
+    CGICCRGBV4CurveTags = 3,    /* rTRC, gTRC, bTRC, all sharing one block */
+    /* Two constant tags is what the seventeen profiles below need between them
+       -- CoreMedia709 carries both, every other space neither -- so two is the
+       most the template allows rather than an arbitrary bound. */
+    CGICCRGBV4MaxExtraTags = 2,
+    CGICCRGBV4MaxTags = CGICCRGBV4FixedTags + CGICCRGBV4CurveTags + 2 /* chad, cicp */
+        + CGICCRGBV4MaxExtraTags,
     /* 'sf32', four reserved bytes, then nine s15Fixed16. */
     CGICCRGBV4ChadLength = 44,
     /* 'cicp', four reserved bytes, then the four coding bytes. */
@@ -1147,6 +1163,14 @@ struct cgs_icc_curve {
 struct cgs_rgb_v4 {
     const char *desc;
     const char *cprt;
+    /* The profile version, as the four-byte field the header carries.  Sixteen
+       of the seventeen rows are v4 and leave this zero; CoreMedia709 is v2.1
+       and says so here.  A v2.1 profile is the reason that one carries the
+       legacy string types below, so the two facts belong together. */
+    int32_t version;
+    /* Whether the strings are the v2 forms -- a legacy 'desc' and 'text' -- or
+       the 'mluc' records the rest of the template uses. */
+    int legacyStrings;
     int created[6];
     int32_t wtpt[3];
     int32_t colorants[9];
@@ -1159,6 +1183,15 @@ struct cgs_rgb_v4 {
     int cicp;
     int32_t cicpValue[4];
     int profileId;
+    /* Constant tags carried verbatim, in tag-table order, after the first tone
+       curve.  CoreMedia709 holds two -- 'vcgt' and 'ndin' -- and their bytes
+       are stored rather than derived, because what they encode is not stated
+       anywhere this file can consult and a second reading of them would be a
+       guess.  Both are copied whole, signature and size field included. */
+    const char *extraName[CGICCRGBV4MaxExtraTags];
+    const unsigned char *extraData[CGICCRGBV4MaxExtraTags];
+    int32_t extraLen[CGICCRGBV4MaxExtraTags];
+    int extraCount;
 };
 
 /* Round up to the next four-byte boundary.  Tag data is stored aligned, and
@@ -1306,32 +1339,98 @@ static void put_icc_header(unsigned char *p, size_t len, const int created[6],
     memcpy(p + 80, "appl", 4);
 }
 
-static void put_rgb_v4_header(unsigned char *p, size_t len, const int created[6])
+/* The header for an RGB space on this template.  Sixteen of the seventeen
+   profiles are v4, and CoreMedia709 is v2.1 -- which is why it carries the
+   legacy string types, and is the reason the version is a row's to give rather
+   than a constant here. */
+static void put_rgb_v4_header(unsigned char *p, size_t len, const int created[6],
+    int32_t version)
 {
-    put_icc_header(p, len, created, 0x04000000, "RGB ");
+    put_icc_header(p, len, created, version, "RGB ");
 }
 
-/* Assemble the profile for one of the eight spaces.  Eight blocks are emitted
-   -- the two strings, the white point, the three colorants, the shared curve
-   and the Bradford inverse -- and the ten tags are pointed at them afterwards,
-   which is what lets the three curve tags share one block. */
+/* Assemble the profile for one of these spaces.  The blocks are laid out one
+   after another -- the two strings, the white point, the three colorants, the
+   shared curve, the Bradford inverse, and any tags the space carries that no
+   other one does -- and the tag table is pointed at them afterwards, which is
+   what lets the three curve tags share one block.  The number of tags is not
+   fixed: the ten the rest carry, eleven when a 'cicp' says what the
+   description leaves out, and twelve for the one space that brings two tags of
+   its own. */
 static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
 {
-    enum { desc, cprt, wtpt, rXYZ, gXYZ, bXYZ, curve, chad, cicp, blockCount };
+    /* The constant tags take their offsets from just past the named blocks
+       rather than from a slot among them, so that adding one cannot collide
+       with a block name. */
+    enum {
+        desc, cprt, wtpt, rXYZ, gXYZ, bXYZ, curve, chad, cicp, blockCount,
+        extra = blockCount
+    };
+    static const char *const fixed[6] = {
+        "desc", "cprt", "wtpt", "rXYZ", "gXYZ", "bXYZ"
+    };
+    static const char *const trcOrder[2][3] = {
+        { "rTRC", "bTRC", "gTRC" },
+        { "bTRC", "rTRC", "gTRC" }
+    };
     unsigned char *p;
     size_t dlen, clen, tlen, len;
-    int32_t tagOff[blockCount], tagLen[blockCount];
-    int ntags, i, ci;
+    /* Room for the blocks above plus the constant tags, whose offsets sit
+       immediately after 'extra' so that the loop below can index them. */
+    int32_t tagOff[blockCount + CGICCRGBV4MaxExtraTags];
+    int32_t tagLen[blockCount + CGICCRGBV4MaxExtraTags];
+    /* The tag table as an explicit order rather than as arithmetic on the loop
+       index: the two strings, the white point, the colorants in red, green,
+       blue order, the first tone curve, any constant tags, 'chad', an optional
+       'cicp', and the other two curves.  Three things vary, and each of them
+       moves the tags after it -- which component owns the shared curve block,
+       whether the coding tag is present, and how many constant tags sit in the
+       middle -- so positions counted off by hand are what a fixed index gets
+       wrong.  Built first, and its length is the tag count, so the count the
+       header records and the table written below cannot come apart. */
+    const char *name[CGICCRGBV4MaxTags];
+    int block[CGICCRGBV4MaxTags];
+    int n = 0, i;
 
-    dlen = 28 + 2 * strlen(v->desc);
-    clen = 28 + 2 * strlen(v->cprt);
+    /* The first six blocks are the six fixed tags, in the same order. */
+    for (i = 0; i < CGICCRGBV4FixedTags; i++) {
+        name[n] = fixed[i];
+        block[n] = i;
+        n++;
+    }
+    name[n] = trcOrder[v->trcOwner][0];
+    block[n++] = curve;
+    for (i = 0; i < v->extraCount; i++) {
+        name[n] = v->extraName[i];
+        block[n++] = extra + i;
+    }
+    name[n] = "chad";
+    block[n++] = chad;
+    if (v->cicp) {
+        name[n] = "cicp";
+        block[n++] = cicp;
+    }
+    name[n] = trcOrder[v->trcOwner][1];
+    block[n++] = curve;
+    name[n] = trcOrder[v->trcOwner][2];
+    block[n++] = curve;
+
+    /* The two string forms size themselves from the string they carry, so in
+       either case the two lengths are worked out here rather than written
+       down. */
+    if (v->legacyStrings) {
+        dlen = 12 + (strlen(v->desc) + 1) + 4 + 4 + 2 + 67 + 1;
+        clen = 8 + strlen(v->cprt) + 1;
+    } else {
+        dlen = 28 + 2 * strlen(v->desc);
+        clen = 28 + 2 * strlen(v->cprt);
+    }
     tlen = v->trc.parametric ? 12 + 4 * (size_t)v->trc.words : 14;
 
     /* Lay the blocks out first so the total size is known before anything is
        allocated.  The offsets are assigned here and used again below, so the
        two passes cannot disagree about where a block went. */
-    ntags = v->cicp ? CGICCRGBV4CicpTagCount : CGICCRGBV4TagCount;
-    len = CGICCTagTableOffset + (size_t)ntags * CGICCTagEntrySize;
+    len = CGICCTagTableOffset + (size_t)n * CGICCTagEntrySize;
     tagLen[desc] = (int32_t)dlen;
     tagOff[desc] = (int32_t)icc_pad(len);
     len = icc_pad(len) + dlen;
@@ -1346,6 +1445,13 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
     tagLen[curve] = (int32_t)tlen;
     tagOff[curve] = (int32_t)icc_pad(len);
     len = icc_pad(len) + tlen;
+    /* The constant tags sit between the first curve and 'chad', which is where
+       the one profile carrying them lists them. */
+    for (i = 0; i < v->extraCount; i++) {
+        tagLen[extra + i] = v->extraLen[i];
+        tagOff[extra + i] = (int32_t)icc_pad(len);
+        len = icc_pad(len) + v->extraLen[i];
+    }
     tagLen[chad] = CGICCRGBV4ChadLength;
     tagOff[chad] = (int32_t)icc_pad(len);
     len = icc_pad(len) + CGICCRGBV4ChadLength;
@@ -1359,49 +1465,30 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
     if (!p)
         return NULL;
 
-    put_rgb_v4_header(p, len, v->created);
-    put_be32(p + CGICCTagCountOffset, (uint32_t)ntags);
+    put_rgb_v4_header(p, len, v->created, v->version ? v->version : CGICCVersionV4);
+    put_be32(p + CGICCTagCountOffset, (uint32_t)n);
 
-    /* The tag table: the two strings, the white point, the colorants in red,
-       green, blue order, then the first tone curve, 'chad', an optional
-       'cicp', and the other two curves.  Two things vary: which component
-       owns the shared curve block, and whether the coding tag is present. */
-    for (i = 0, ci = 0; i < ntags; i++) {
-        static const char *const fixed[6] = {
-            "desc", "cprt", "wtpt", "rXYZ", "gXYZ", "bXYZ"
-        };
-        static const char *const trcOrder[2][3] = {
-            { "rTRC", "bTRC", "gTRC" },
-            { "bTRC", "rTRC", "gTRC" }
-        };
+    for (i = 0; i < n; i++) {
         unsigned char *e = p + CGICCTagTableOffset + i * CGICCTagEntrySize;
-        const char *name;
-        int block;
 
-        if (i < 6) {
-            name = fixed[i];
-            block = i;
-        } else if (i == 7) {
-            name = "chad";
-            block = chad;
-        } else if (v->cicp && i == 8) {
-            name = "cicp";
-            block = cicp;
-        } else {
-            name = trcOrder[v->trcOwner][ci++];
-            block = curve;
-        }
-        memcpy(e, name, 4);
-        put_be32(e + 4, tagOff[block]);
-        put_be32(e + 8, tagLen[block]);
+        memcpy(e, name[i], 4);
+        put_be32(e + 4, tagOff[block[i]]);
+        put_be32(e + 8, tagLen[block[i]]);
     }
 
-    put_mluc(p + tagOff[desc], v->desc);
-    put_mluc(p + tagOff[cprt], v->cprt);
+    if (v->legacyStrings) {
+        put_desc(p + tagOff[desc], v->desc);
+        put_text(p + tagOff[cprt], v->cprt);
+    } else {
+        put_mluc(p + tagOff[desc], v->desc);
+        put_mluc(p + tagOff[cprt], v->cprt);
+    }
     put_xyz_i32(p + tagOff[wtpt], v->wtpt);
     for (i = 0; i < 3; i++)
         put_xyz_i32(p + tagOff[rXYZ + i], v->colorants + 3 * i);
     put_icc_curve(p + tagOff[curve], &v->trc);
+    for (i = 0; i < v->extraCount; i++)
+        memcpy(p + tagOff[extra + i], v->extraData[i], v->extraLen[i]);
     put_chad(p + tagOff[chad], v->chad);
     if (v->cicp)
         put_cicp(p + tagOff[cicp], v->cicpValue);
@@ -1412,9 +1499,9 @@ static unsigned char *put_rgb_v4(const struct cgs_rgb_v4 *v, size_t *outLen)
     return p;
 }
 
-/* The eight spaces.  Each row was recovered from the profile its name resolves
-   to, and put_rgb_v4 was checked against all eight by rebuilding each profile
-   and comparing it byte for byte with the one Apple hands back.
+/* These spaces.  Each row was recovered from the profile its name resolves
+   to, and put_rgb_v4 was checked against every one of them by rebuilding each
+   profile and comparing it byte for byte with the one Apple hands back.
 
    Two details are visible in the tag table rather than in the values, so they
    are worth stating here.  All three tone curve tags point at one shared block
@@ -1555,16 +1642,79 @@ static const struct cgs_rgb_v4 ACESCGLinear = {
     .chad = { 0x108bf, 0x44e, -0x997, 0x589, 0xfe03, -0x341, -0x1c6, 0x2e6, 0xd021 },
 };
 
-/* The ten names those eight profiles answer to, and the space each one builds.
-   An extended-range name takes the same profile bytes as its base -- the
-   profile carries no range, and the two spaces are reported unequal because
-   the flag below is what differs -- so it is the name and the flag that are
-   per-space rather than the profile.
+/* The two constant tags in CoreMedia709, stored whole and copied verbatim.
 
-   Every one of the ten is an immortal singleton: two calls answer the same
+   Both blocks carry their own signature and their own length, which is what
+   makes them worth keeping as bytes rather than as something to rebuild: the
+   signature is what the tag table points at, and the length is what a reader
+   inside the block agrees with.  Copying the block copies both.
+
+   'vcgt' is a video characteristics tag and 'ndin' a natural dimming one, and
+   what they encode is not written down anywhere this file could check it
+   against -- there is no Apple API that reads either back.  So the numbers are
+   recorded rather than interpreted.  Both are here because CoreMedia709 is the
+   one profile among these that carries them, and they are what make it twelve
+   tags where the rest are ten or eleven. */
+static const unsigned char CoreMedia709VCGT[48] = {
+    /* 'vcgt', four reserved, then six pairs of flags. */
+    0x76, 0x63, 0x67, 0x74, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+};
+static const unsigned char CoreMedia709NDIN[62] = {
+    /* 'ndin', four reserved, a length of 54, then the block itself. */
+    0x6e, 0x64, 0x69, 0x6e, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x36,
+    0x00, 0x00, 0xa3, 0xd7, 0x00, 0x00, 0x54, 0x7b,
+    0x00, 0x00, 0x4c, 0xcd, 0x00, 0x00, 0x99, 0x9a,
+    0x00, 0x00, 0x26, 0x66, 0x00, 0x00, 0x0f, 0x5c,
+    0x00, 0x00, 0x50, 0x0d, 0x00, 0x00, 0x54, 0x39,
+    0x00, 0x01, 0xf6, 0x04, 0x00, 0x01, 0xf6, 0x04,
+    0x00, 0x01, 0xf6, 0x04, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00,
+};
+
+/* CoreMedia709 is the seventeenth profile on this template, and the only one
+   that is not a v4 profile: its header declares v2.1, which is why it carries
+   the legacy 'desc' and 'text' strings rather than 'mluc', and it is the only
+   one with two tags in the middle of the table.  Its white point is not
+   quantised to the value the other sixteen share, and its copyright is the
+   only one that is not a template sentence with a year in it.
+
+   What it does share is worth as much: the BT.709 colorants to the last bit,
+   the Bradford inverse, and a header illuminant equal to the D50 the rest use.
+   Its tone curve is a u8Fixed8 gamma of 502/256, which is not BT.709's 2.4 --
+   the space is named for the primaries, and the transfer function is a
+   separate question the profile answers on its own. */
+static const struct cgs_rgb_v4 CoreMedia709 = {
+    .desc = "HDTV",
+    .version = CGICCVersionV21,
+    .legacyStrings = 1,
+    .created = { 2005, 4, 1, 1, 1, 1 },
+    .cprt = "Copyright 2007 Apple Inc.",
+    .wtpt = { 0xf351, 0x10000, 0x116cc },
+    .colorants = { 0x6fa2, 0x38f5, 0x390, 0x6299, 0xb785, 0x18da, 0x24a0, 0xf84, 0xb6cf },
+    .trc = { 0, 0, 502, 0, { 0x0 } },  /* u8Fixed8 gamma, 502/256 */
+    .chad = { 0x10c42, 0x5de, -0xcda, 0x793, 0xfd90, -0x45e, -0x25d, 0x3dc, 0xc06e },
+    .extraName = { "vcgt", "ndin" },
+    .extraData = { CoreMedia709VCGT, CoreMedia709NDIN },
+    .extraLen = { sizeof CoreMedia709VCGT, sizeof CoreMedia709NDIN },
+    .extraCount = 2,
+};
+
+/* The seventeen names those eleven profiles answer to, and the space each one
+   builds.  An extended-range name takes the same profile bytes as its base --
+   the profile carries no range, and the two spaces are reported unequal
+   because the flag below is what differs -- so it is the name and the flag that
+   are per-space rather than the profile.
+
+   Every one of the seventeen is an immortal singleton: two calls answer the same
    pointer at the immortal retain count, exactly as the device names do.  So
    each row is built on first use and then kept. */
-enum { CGColorSpaceNamedRGBV4Count = 16 };
+enum { CGColorSpaceNamedRGBV4Count = 17 };
 
 static const struct {
     const char *name;
@@ -1581,6 +1731,7 @@ static const struct {
     { "kCGColorSpaceROMMRGB", &ROMMRGB, false },
     { "kCGColorSpaceDCIP3", &DCIP3, false },
     { "kCGColorSpaceACESCGLinear", &ACESCGLinear, false },
+    { "kCGColorSpaceCoreMedia709", &CoreMedia709, false },
     { "kCGColorSpaceLinearSRGB", &LinearSRGB, false },
     { "kCGColorSpaceExtendedLinearSRGB", &LinearSRGB, true },
     { "kCGColorSpaceLinearDisplayP3", &LinearDisplayP3, false },
@@ -1704,7 +1855,7 @@ static unsigned char *put_gray_v2(const struct cgs_gray_v2 *v, size_t *outLen)
     if (!p)
         return NULL;
 
-    put_icc_header(p, len, v->created, 0x02100000, "GRAY");
+    put_icc_header(p, len, v->created, CGICCVersionV21, "GRAY");
     put_be32(p + CGICCTagCountOffset, (uint32_t)CGICCGrayV2TagCount);
     for (i = 0; i < CGICCGrayV2TagCount; i++) {
         unsigned char *e = p + CGICCTagTableOffset + i * CGICCTagEntrySize;
@@ -2543,7 +2694,7 @@ static unsigned char *put_hdr(const struct cgs_hdr *v, const int32_t *matrix,
     if (!p)
         return NULL;
 
-    put_rgb_v4_header(p, len, v->created);
+    put_rgb_v4_header(p, len, v->created, CGICCVersionV4);
     put_be32(p + CGICCTagCountOffset, (uint32_t)CGICCHDRTagCount);
     for (i = 0; i < CGICCHDRTagCount; i++) {
         unsigned char *e = p + CGICCTagTableOffset + i * CGICCTagEntrySize;

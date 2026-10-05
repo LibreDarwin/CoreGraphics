@@ -99,7 +99,7 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
 
    The names that resolve here are of two kinds.  Five need no profile of
    their own -- the three device names, kCGColorSpaceColoredPattern and
-   kCGColorSpaceGenericLab -- and the twenty-eight described below are assembled
+   kCGColorSpaceGenericLab -- and the twenty-nine described below are assembled
    from recovered constants.  Every other name yields NULL, because it resolves
    to a space carrying an embedded profile this step cannot emit yet.  That set
    is neither the identifier table nor a subset of it: of the 50 name constants
@@ -116,12 +116,24 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
    byte-for-byte what CGColorSpaceCreateLab with a D65 or D50 white point
    produces.
 
-   Sixteen more names resolve to the eleven profiles that share a v4 shape:
-   Display P3, the two ITU-R spaces, BT.2020 with an sRGB gamma, the Display
-   P3 space with a 709 OETF, ROMM RGB, DCI P3 and ACES CG Linear, plus the
-   three linearized spaces.  Their profiles are synthesised from a table of
-   recovered constants rather than computed, and each is byte-for-byte what
-   Apple hands back -- 536 to 600 bytes depending on the space.
+   Seventeen more names resolve to the twelve profiles that share one
+   template: Display P3, the two ITU-R spaces, BT.2020 with an sRGB gamma,
+   the Display P3 space with a 709 OETF, ROMM RGB, DCI P3, ACES CG Linear,
+   kCGColorSpaceCoreMedia709, plus the three linearized spaces.  Their
+   profiles are synthesised from a table of recovered constants rather than
+   computed, and each is byte-for-byte what Apple hands back -- 536 to 660
+   bytes depending on the space.
+
+   CoreMedia709 is built from that template too but is not a v4 profile: its
+   header declares v2.1, and the differences that follow are visible in the
+   bytes.  It carries the legacy 'desc' and 'text' strings where the others
+   carry 'mluc' records, a white point that is not the quantised one the
+   other eleven share, two tags of its own -- 'vcgt' and 'ndin' -- between
+   the first tone curve and the Bradford inverse, and so twelve tags where
+   the rest carry ten or eleven.  It reports the same type as the v4
+   profiles anyway, so nothing about it is visible without reading the
+   header.  Its 660 bytes are the largest of the group, and it is not wide
+   gamut because its primaries are BT.709's.
 
    Ten further names resolve to six HDR profiles: the PQ and HLG variants of
    the Display P3, Rec. ITU-R BT.709-5 and BT.2100 primaries, from 7,156 to
@@ -146,7 +158,7 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
    gamma spaces of the same primaries: the BT.2100 and Display P3 HDR spaces
    are wide gamut and the BT.709 ones are not.
 
-   Four details of those sixteen are worth knowing.  Each is an immortal
+   Four details of those seventeen are worth knowing.  Each is an immortal
    singleton, like the device spaces.  kCGColorSpaceExtendedDisplayP3,
    kCGColorSpaceExtendedITUR_2020 and the three extended linear names take the
    same profile bytes as their base and are told apart only by the
@@ -178,7 +190,7 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
    be wider than anything.  It is not the device gray either: the profile is
    what distinguishes them.
 
-   Every other name returns NULL for now; the remaining seventeen resolve to
+   Every other name returns NULL for now; the remaining sixteen resolve to
    embedded profiles, which the rest of this file's constructors do not yet
    assemble. */
 CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateWithName(

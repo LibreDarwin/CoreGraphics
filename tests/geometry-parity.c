@@ -2786,7 +2786,7 @@ int main(void)
                    the extended name takes the same 356 bytes as its base. */
                 "kCGColorSpaceLinearGray",
                 "kCGColorSpaceExtendedLinearGray",
-                /* The eleven v4 profiles, which between them carry sixteen
+                /* The twelve v4-template profiles, which between them carry seventeen
                    names: the three extended-range aliases take the same
                    profile bytes as their base and differ only in the name and
                    the extended flag. */
@@ -2800,6 +2800,14 @@ int main(void)
                 "kCGColorSpaceROMMRGB",
                 "kCGColorSpaceDCIP3",
                 "kCGColorSpaceACESCGLinear",
+                /* The seventeenth v4-template profile, and the only one of
+                   them that is not a v4 profile: its header declares v2.1, so
+                   it carries the legacy 'desc' and 'text' strings, two tags of
+                   its own in the middle of the table, and a white point that is
+                   not the quantised one the other sixteen share.  It reports
+                   the same type as they do, which is worth having in the table
+                   since nothing about the header would suggest it. */
+                "kCGColorSpaceCoreMedia709",
                 /* The linearized three, which differ from their gamma
                    counterparts in carrying a 'cicp' tag and a profile ID
                    where the others carry neither. */
@@ -2838,6 +2846,14 @@ int main(void)
                Generic spellings are the interesting ones: they read like
                names in the table and are not. */
             static const char *const refuses[] = {
+                /* A real constant rather than a misspelling, and so listed
+                   here rather than in the near misses below: Apple has the
+                   name, the identifier is 0, and the lookup still refuses it.
+                   That makes it the one name a lookup built off the
+                   identifier table gets wrong for a different reason than the
+                   other seven -- it looks like a known id rather than an
+                   unknown one. */
+                "kCGColorSpacePattern",
                 "kCGColorSpaceUnnamed",
                 "kCGColorSpaceInvalid",
                 "kCGColorSpaceGenericCMYKGamma2_2",
@@ -2901,6 +2917,11 @@ int main(void)
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* ROMM RGB */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* DCI P3 */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* ACES CG Linear */
+                /* CoreMedia709 reports the same type as the sixteen v4
+                   profiles around it even though its header is v2.1, and is
+                   not wide gamut because its primaries are BT.709's, exactly
+                   as the gamma space of those primaries is not. */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 0 },        /* CoreMedia709 */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 0 },        /* Linear sRGB */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 1, 1 },        /* Extended Linear sRGB */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* Linear Display P3 */
