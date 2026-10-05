@@ -99,7 +99,7 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
 
    The names that resolve here are of two kinds.  Five need no profile of
    their own -- the three device names, kCGColorSpaceColoredPattern and
-   kCGColorSpaceGenericLab -- and the eighteen described below are assembled
+   kCGColorSpaceGenericLab -- and the twenty-six described below are assembled
    from recovered constants.  Every other name yields NULL, because it resolves
    to a space carrying an embedded profile this step cannot emit yet.  That set
    is neither the identifier table nor a subset of it: of the 45 name constants
@@ -122,6 +122,26 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
    three linearized spaces.  Their profiles are synthesised from a table of
    recovered constants rather than computed, and each is byte-for-byte what
    Apple hands back -- 536 to 600 bytes depending on the space.
+
+   Eight further names resolve to six HDR profiles: the PQ and HLG variants of
+   the Display P3, Rec. ITU-R BT.709-5 and BT.2100 primaries, from 7,156 to
+   13,332 bytes.  They are byte-for-byte what Apple hands back, built from one
+   shared template whose only per-space parts are the description, the 'cicp'
+   coding and the reference luminance.  Two things are worth knowing about
+   them.  Each is an immortal singleton, as the others are; and
+   kCGColorSpaceITUR_2020_PQ and kCGColorSpaceITUR_2100_PQ are one space under
+   two names rather than two spaces, as are the HLG pair.  Asking for either
+   2020 spelling answers the same pointer as the 2100 one and reports the
+   2100 name.
+
+   Those eight need the primaries recorded beside the profile rather than read
+   out of it.  An HDR profile names its primaries in its description and then
+   stores no colorants at all -- what it holds instead is a lut16Type whose
+   matrix is not the primaries even up to scale -- so the measured triangle
+   area cannot be computed from the bytes the way it is for the v4 profiles.
+   The primaries are kept per space, and the answers come out as they do for the
+   gamma spaces of the same primaries: the BT.2100 and Display P3 HDR spaces
+   are wide gamut and the BT.709 ones are not.
 
    Four details of those sixteen are worth knowing.  Each is an immortal
    singleton, like the device spaces.  kCGColorSpaceExtendedDisplayP3,

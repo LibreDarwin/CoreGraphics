@@ -2758,9 +2758,9 @@ int main(void)
 
         /* CreateWithName.  Only names whose answers agree are recorded here.
            Apple resolves 40 of the 45 name constants and this step resolves
-           twenty-three, so the other 17 would be a mismatch rather than a test and
-           each one joins this family as its profile template lands.  What is
-           recorded is the part that is not obvious from the name: that the
+           thirty-one, so the other nine would be a mismatch rather than a test
+           and each one joins this family as its profile template lands.  What
+           is recorded is the part that is not obvious from the name: that the
            device names answer the existing singletons, that a pattern name
            builds something fresh every call, and that the generic Lab name
            resolves to precisely the profile CreateLab already emits. */
@@ -2800,6 +2800,22 @@ int main(void)
                 "kCGColorSpaceExtendedLinearDisplayP3",
                 "kCGColorSpaceLinearITUR_2020",
                 "kCGColorSpaceExtendedLinearITUR_2020",
+                /* The six HDR profiles, which between them carry eight names:
+                   the PQ and HLG variants of the Display P3, 709 and 2020
+                   primaries.  None of the eight carries the extended flag,
+                   since an HDR space is not a range variant of a base one.
+                   The two 2100 names are not separate spaces at all: each is
+                   a second spelling of the 2020 one, answering the same
+                   pointer and reporting the 2100 name, which is what the name
+                   check below is there to pin down. */
+                "kCGColorSpaceITUR_2020_PQ",
+                "kCGColorSpaceITUR_2100_PQ",
+                "kCGColorSpaceITUR_2020_HLG",
+                "kCGColorSpaceITUR_2100_HLG",
+                "kCGColorSpaceITUR_709_PQ",
+                "kCGColorSpaceITUR_709_HLG",
+                "kCGColorSpaceDisplayP3_PQ",
+                "kCGColorSpaceDisplayP3_HLG",
             };
             /* Names Apple itself refuses, so the NULL is a shared answer
                rather than this step's gap.  Unnamed and Invalid are the two
@@ -2876,6 +2892,24 @@ int main(void)
                 { kCGColorSpaceModelRGB, 3, 6, 1, 1, 1 },        /* Extended Linear Display P3 */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* Linear ITUR_2020 */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 1, 1 },        /* Extended Linear ITUR_2020 */
+                /* The six HDR spaces, one row per profile.  Each is a three-
+                   component ICC space of the same type as the v4 ones, none is
+                   extended, and the wide answer follows the primaries rather
+                   than the spelling: the 2020 and P3 HDR spaces are wide gamut
+                   and the 709 ones are not, exactly as their gamma
+                   counterparts are.
+
+                   The two 2100 names take the row of the 2020 space they
+                   resolve to, since asking for either spelling answers the
+                   same space and reports the 2100 name. */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* ITUR_2020_PQ */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* ITUR_2100_PQ */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* ITUR_2020_HLG */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* ITUR_2100_HLG */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 0 },        /* ITUR_709_PQ */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 0 },        /* ITUR_709_HLG */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* DisplayP3_PQ */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* DisplayP3_HLG */
             };
             size_t i;
 
@@ -2899,7 +2933,15 @@ int main(void)
                     snprintf(l, sizeof l, "nm/%s/name", resolves[i]);
                     cfstr(l, CGColorSpaceCopyName(r));
                     snprintf(l, sizeof l, "nm/%s/icc", resolves[i]);
-                    icc(l, CGColorSpaceCopyICCData(r));
+                    /* Masked rather than compared whole, because one name in
+                       this list carries a live creation date: the generic Lab
+                       profile is built by CreateLab, and CreateLab is the one
+                       builder here that stamps the current time rather than a
+                       constant.  Every other named profile in the list is
+                       byte-identical run to run, and a masked date cannot hide
+                       a difference in any of those -- the bytes being masked are
+                       the same bytes on both sides. */
+                    icc_live_date(l, CGColorSpaceCopyICCData(r));
                     snprintf(l, sizeof l, "nm/%s/base_is_null", resolves[i]);
                     b(l, CGColorSpaceGetBaseColorSpace(r) == NULL);
                     snprintf(l, sizeof l, "nm/%s/out", resolves[i]);
@@ -2922,6 +2964,63 @@ int main(void)
                     CGColorSpaceRelease(r);
                 }
                 CFRelease(s);
+            }
+            /* The two 2020/2100 pairs are one space under two names, which
+               the per-name lines above cannot show: each answers its own
+               stability check, so both spellings are stable without either
+               revealing that they are stable as the same object.  Asking for
+               both and comparing the pointers is what distinguishes a second
+               name from a second space. */
+            {
+                static const char *const pairs[][2] = {
+                    { "kCGColorSpaceITUR_2020_PQ", "kCGColorSpaceITUR_2100_PQ" },
+                    { "kCGColorSpaceITUR_2020_HLG", "kCGColorSpaceITUR_2100_HLG" },
+                };
+                static const char *const reported[2] = {
+                    "kCGColorSpaceITUR_2100_PQ", "kCGColorSpaceITUR_2100_HLG",
+                };
+                const size_t np = sizeof pairs / sizeof pairs[0];
+
+                for (i = 0; i < np; i++) {
+                    CFStringRef a = CFStringCreateWithCString(NULL,
+                        pairs[i][0], kCFStringEncodingUTF8);
+                    CFStringRef bstr = CFStringCreateWithCString(NULL,
+                        pairs[i][1], kCFStringEncodingUTF8);
+                    CGColorSpaceRef ra = CGColorSpaceCreateWithName(a);
+                    CGColorSpaceRef rb = CGColorSpaceCreateWithName(bstr);
+
+                    /* Both spellings in one label would run to
+                       "nm/kCGColorSpaceITUR_2020_HLG/kCGColorSpaceITUR_2100_HLG",
+                       which does not fit the 64 bytes every label here has,
+                       so the pair is named by its 2020 half. */
+                    snprintf(l, sizeof l, "nm/%s/pair_same", pairs[i][0]);
+                    b(l, ra == rb);
+                    /* And the pair reports the 2100 spelling under both
+                       names, so the name is a property of the space rather
+                       than of the lookup. */
+                    snprintf(l, sizeof l, "nm/%s/pair_name", pairs[i][0]);
+                    cfstr(l, CGColorSpaceCopyName(ra));
+                    snprintf(l, sizeof l, "nm/%s/pair_name_is_2100",
+                        pairs[i][0]);
+                    {
+                        /* Compared as ASCII: cfstr above already records the
+                           spelling itself, and this only has to agree with
+                           it, which the same helper cannot say. */
+                        CFStringRef got = CGColorSpaceCopyName(ra);
+                        char buf[64] = "";
+                        int match;
+
+                        match = got && CFStringGetCString(got, buf,
+                            sizeof buf, kCFStringEncodingUTF8);
+                        b(l, match && strcmp(buf, reported[i]) == 0);
+                        if (got)
+                            CFRelease(got);
+                    }
+                    CGColorSpaceRelease(ra);
+                    CGColorSpaceRelease(rb);
+                    CFRelease(a);
+                    CFRelease(bstr);
+                }
             }
             for (i = 0; i < nref; i++) {
                 CFStringRef s = CFStringCreateWithCString(NULL, refuses[i],
