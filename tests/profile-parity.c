@@ -592,11 +592,85 @@ static void dump_name(const char *name)
     CFRelease(key);
 }
 
+/* A profile reached through a Create* constructor, dumped with the same
+   transcript machinery as the named profiles.  `key' goes into the one
+   case-owning line; everything dump_profile emits from here pools with the
+   named profiles' lines, which is the same order-based contract the 44 names
+   already rely on.  Each case is chosen to be byte-gated by
+   geometry-parity.c's md5 checks where possible, so the differential is
+   broken only by a real divergence rather than by a profile nobody has
+   verified; the lab_d50 and cal_rgb cases sit just outside those gates on
+   purpose.
+
+   Conspicuously absent: a linearized space derived from a *named* profile,
+   such as CGColorSpaceCreateLinearized of kCGColorSpaceSRGB.  Apple rebuilds
+   those as tag-preserving canonical profiles (the sRGB one is the same 572
+   bytes as kCGColorSpaceLinearSRGB, with a legacy 'desc' record and a chad
+   and cicp tag), while our builder only accepts the mluc description of a
+   calibrated base and hands back a minimal profile -- so the case fails on
+   that separate, unfixed divergence rather than on anything this file grows
+   along with.  It gets added when that constructor does. */
+static void dump_constructed(const char *key, CGColorSpaceRef cs)
+{
+    CFDataRef d;
+
+    if (!cs) {
+        printf("cons %s null\n", key);
+        return;
+    }
+    d = CGColorSpaceCopyICCData(cs);
+    printf("cons %s model=%ld ncomp=%zu type=%d out=%d ext=%d wide=%d "
+        "icc_null=%d", key, (long)CGColorSpaceGetModel(cs),
+        CGColorSpaceGetNumberOfComponents(cs), CGColorSpaceGetType(cs),
+        CGColorSpaceSupportsOutput(cs) ? 1 : 0,
+        CGColorSpaceUsesExtendedRange(cs) ? 1 : 0,
+        CGColorSpaceIsWideGamutRGB(cs) ? 1 : 0, d == NULL);
+    if (d) {
+        printf(" icc_len=%zu\n", CFDataGetLength(d));
+        dump_profile(CFDataGetBytePtr(d), CFDataGetLength(d));
+        CFRelease(d);
+    } else {
+        putchar('\n');
+    }
+    CGColorSpaceRelease(cs);
+}
+
 int main(int argc, char **argv)
 {
     int i;
 
     for (i = 1; i < argc; i++)
         dump_name(argv[i]);
+
+    /* The constructed profiles, in a fixed order so both transcripts pool
+       their shared labels identically.  lab_d50 is the common real-world call
+       (a D50 that fails the float-exact gate, so it collapses onto the
+       generic Lab profile); lab_unity_bp is a white and black point that
+       survive the gate, giving the 516-byte form with two distinct XYZ tags;
+       cal_gray and cal_rgb are the calibrated builders; lin_rgb is the
+       linearized derivative that drops the tone curves and black point and
+       appends to the description; ext_disp is the extended form whose profile
+       is its base's byte for byte. */
+    {
+        static const CGFloat unity[3] = { 1.0, 1.0, 1.0 };
+        static const CGFloat d50[3] = { 0.9505, 1.0, 1.0890 };
+        static const CGFloat bp[3] = { 0.5, 0.25, 0.125 };
+        static const CGFloat g222[3] = { 2.2, 2.2, 2.2 };
+        static const CGFloat idm[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+        CGColorSpaceRef rgb = CGColorSpaceCreateCalibratedRGB(d50, NULL,
+            g222, idm);
+        CGColorSpaceRef lin = CGColorSpaceCreateLinearized(rgb);
+        CGColorSpaceRef p3 = CGColorSpaceCreateWithName(
+            CFSTR("kCGColorSpaceDisplayP3"));
+
+        dump_constructed("lab_d50", CGColorSpaceCreateLab(d50, NULL, NULL));
+        dump_constructed("lab_unity_bp", CGColorSpaceCreateLab(unity, bp, NULL));
+        dump_constructed("cal_gray", CGColorSpaceCreateCalibratedGray(d50,
+            NULL, 2.2));
+        dump_constructed("cal_rgb", rgb);
+        dump_constructed("lin_rgb", lin);
+        dump_constructed("ext_disp", CGColorSpaceCreateExtended(p3));
+        CFRelease(p3);
+    }
     return 0;
 }

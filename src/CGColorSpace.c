@@ -55,28 +55,36 @@
 
 /* CGColorSpaceGetType's values.  This tag is finer-grained than
    CGColorSpaceModel: a pattern space reports 9 whatever its base says,
-   which the model could not express.  Probed on all five spaces we
-   implement; the device spaces report 0, 1 and 2 in that order, a Lab
-   space reports 5, and both pattern spaces report 9. */
+   which the model could not express.  Probed on Apple: the device spaces
+   report 0, 1 and 2 in that order; a calibrated gray reports 3 and a
+   calibrated RGB 4, distinct from the device values they pair with; a Lab
+   space reports 5; any space built from an ICC profile reports 6 -- which is
+   also what a linearized space reports, whatever its base; an indexed space
+   reports 7; and both pattern spaces report 9. */
 enum {
     CGColorSpaceTypeMonochrome = 0,
     CGColorSpaceTypeRGB = 1,
     CGColorSpaceTypeCMYK = 2,
+    /* The calibrated builders must not reuse the device spaces' values: two
+       color spaces whose types differ never compare equal, and Apple keeps
+       the pairs apart. */
+    CGColorSpaceTypeCalibratedMonochrome = 3,
+    CGColorSpaceTypeCalibratedRGB = 4,
     CGColorSpaceTypeLab = 5,
-    CGColorSpaceTypePattern = 9,
+    /* What CGColorSpaceGetType reports for any space built from an ICC
+       profile, whatever the profile's colour model: gray, RGB, CMYK, XYZ, Lab
+       and a generic RGB all report 6, as does every built-in named space
+       except Lab, which reports 5 because CGColorSpaceCreateLab builds it
+       directly rather than from a profile.  A linearized space reports 6 too
+       -- it is a profile, the base's rebuilt, even when the base was
+       calibrated -- while an extended space reports whatever its base does. */
+    CGColorSpaceTypeICC = 6,
     /* What CGColorSpaceGetType reports for an indexed space, and the only
        value here that does not come from the base: an indexed space reports 7
        whether its base is gray, RGB or CMYK, so this tag cannot be derived
        from the model the way the device spaces' can. */
     CGColorSpaceTypeIndexed = 7,
-    /* What CGColorSpaceGetType reports for any space built from an ICC
-       profile, whatever the profile's colour model.  Verified by reading the
-       private CGColorSpaceGetType off a space built by
-       CGColorSpaceCreateWithICCData: gray, RGB, CMYK, XYZ, Lab and a generic
-       RGB all report 6, and so does every built-in named space except Lab,
-       which reports 5 because CGColorSpaceCreateLab builds it directly rather
-       than from a profile. */
-    CGColorSpaceTypeICC = 6
+    CGColorSpaceTypePattern = 9
 };
 
 struct CGColorSpace {
@@ -142,6 +150,15 @@ struct CGColorSpace {
        neither.  Deriving it from the profile would mean looking for an
        identity tone curve, which is what the flag records. */
     bool linearized;
+    /* Whether a linearized space was built from a calibrated base.  This is
+       what keeps CGColorSpaceIsWideGamutRGB answerable once the type of a
+       linearized space is fixed: a calibrated and a named base both linearize
+       to a type-6 space -- the type cannot tell them apart -- yet Apple calls
+       the calibrated-derived one wide gamut whatever its primaries and the
+       named-derived one wide or not by its primaries.  The distinction is
+       only meaningful for a linearized space, and the extended-range flag
+       already short-circuits the answer, so nothing else reads it. */
+    bool linearizedCalibrated;
     /* The space's colorants as nine s15Fixed16, when the profile carries none.
 
        CGColorSpaceIsWideGamutRGB otherwise reads them out of the profile's
@@ -901,7 +918,7 @@ CGColorSpaceRef CGColorSpaceCreateCalibratedGray(const CGFloat
     s->immortal = false;
     s->refcount = 1;
     s->model = kCGColorSpaceModelMonochrome;
-    s->type = CGColorSpaceTypeMonochrome;
+    s->type = CGColorSpaceTypeCalibratedMonochrome;
     s->ncomp = 1;
     /* A calibrated space is named for being calibrated, not for its white
        point, and the name does not vary with gamma. */
@@ -3015,7 +3032,13 @@ static void cgs_v2_block_put(unsigned char *p, const struct cgs_v2_profile *v,
    which is what keeps the shorter profile's arithmetic from shifting.  Zero
    the reserved fields are not: the stored blocks and the writers all carry
    their own, and the header ends up byte for byte what each profile resolves
-   to except the size, which is patched at the end. */
+   to except the size, which is patched at the end.  What is *not* written is
+   the run of alignment padding between two blocks whose lengths are not
+   four-aligned -- the sRGB page's first two rows both end three bytes short
+   and its ninth ends two -- so the buffer has to be calloc'd, not malloc'd:
+   a byte that depends on the allocator handing back zeroed memory changes
+   the profile from one build to another, which is exactly the kind of
+   nondeterminism the md5 gates exist to catch. */
 static unsigned char *put_v2_profile(const struct cgs_v2_profile *v,
     size_t *outLen)
 {
@@ -3036,7 +3059,7 @@ static unsigned char *put_v2_profile(const struct cgs_v2_profile *v,
         len = (size_t)off[b] + cgs_v2_block_length(v, b);
         laid[b] = 1;
     }
-    p = malloc(len);
+    p = calloc(len, 1);
     if (!p)
         return NULL;
     memcpy(p, v->header, CGICCHeaderLength);
@@ -7833,7 +7856,7 @@ CGColorSpaceRef CGColorSpaceCreateCalibratedRGB(const CGFloat
     s->immortal = false;
     s->refcount = 1;
     s->model = kCGColorSpaceModelRGB;
-    s->type = CGColorSpaceTypeRGB;
+    s->type = CGColorSpaceTypeCalibratedRGB;
     s->ncomp = 3;
     s->name = NULL;
     s->base = NULL;
@@ -9337,13 +9360,16 @@ static CGColorSpaceRef CGColorSpaceCreateLinearizedInternal(
     s->immortal = false;
     s->refcount = 1;
     s->model = base->model;
-    s->type = base->type;
+    s->type = CGColorSpaceTypeICC;
     s->ncomp = base->ncomp;
     s->name = base->name;
     s->base = NULL;
     s->profile = p;
     s->profileLen = len;
     s->linearized = true;
+    s->linearizedCalibrated = base->linearizedCalibrated
+        || base->type == CGColorSpaceTypeCalibratedRGB
+        || base->type == CGColorSpaceTypeCalibratedMonochrome;
     s->extended = extended;
     return s;
 }
@@ -10076,47 +10102,51 @@ bool CGColorSpaceIsWideGamutRGB(CGColorSpaceRef space)
     if (s == NULL)
         return false;
 
-    /* A space built from a profile normally answers from its colorants, and
-       only an RGB one has the primaries the measure needs.  The extended flag
-       still overrides, though: the extended-range linear sRGB hands back the
-       very bytes the unextended one does, and calls that wide gamut while the
-       other is not, so the profile alone cannot answer.  The type has to be
-       tested before the flag path below, which is how the same profile handed
-       to a calibrated RGB caller comes out a different answer.
+    /* The extended-range flag answers first, because it is the one thing that
+       makes a space wide gamut that the profile cannot: an extended sRGB
+       reports wide while the plain sRGB does not, and both hold the same
+       profile bytes.  It is confined to RGB, because
+       kCGColorSpaceExtendedLinearGray reports an extended range and is
+       nevertheless not wide gamut. */
+    if (s->extended)
+        return s->model == kCGColorSpaceModelRGB;
 
-       That override is itself confined to RGB, because a gray profile has no
-       primaries to be wider than anything.  kCGColorSpaceExtendedLinearGray
-       reports an extended range and is nevertheless not wide gamut, so
-       letting the flag stand on its own would call it one. */
-    if (s->type == CGColorSpaceTypeICC)
-        return s->model == kCGColorSpaceModelRGB
-               && (s->extended || (s->profile != NULL
-                                   && (s->primaries != NULL
-                                       ? icc_primaries_are_wide(s->primaries)
-                                       : icc_rgb_is_wide(s->profile, s->profileLen))));
-
-    /* A gamut wider than sRGB is not a property of the profile: a linearized
-       RGB space answers true while answering false for an extended range,
-       and both an extended gray and a linearized gray answer false.  So it
-       is a three-component space that was linearized or extended, and
-       nothing else.
-
-       One caveat, and it is visible in the profile rather than the flags.  A
-       linearized RGB space whose colorants all collapsed onto the white
-       point's block is degenerate -- a zero white point makes every colorant
-       zero as well -- and Apple does not call those wide gamut.  The collapse
-       is legible in the tag table, so it can be asked rather than recorded. */
-    if (s->ncomp != 3 || (!s->extended && !s->linearized))
-        return false;
-    if (s->linearized && !s->extended && s->profile) {
-        size_t len;
-        long wtpt = icc_find_tag(s->profile, s->profileLen, "wtpt", &len);
-        long rXYZ = icc_find_tag(s->profile, s->profileLen, "rXYZ", &len);
-
-        if (wtpt < 0 || rXYZ < 0 || wtpt == rXYZ)
+    /* A linearized space -- the extended flag having failed -- still cannot
+       be answered from its type: after the corrections above it reports 6
+       (ICC) whatever its base was, while a calibrated and a named base answer
+       differently.  That is what the linearizedCalibrated flag exists for.
+       A gray base has no primaries to be wider than anything and so is never
+       wide; a calibrated RGB base is wide unless its colorants collapsed onto
+       the white point's block, which is degenerate and legible in the tag
+       table; and a named base answers from its primaries like the space it
+       was derived from would. */
+    if (s->linearized) {
+        if (s->model != kCGColorSpaceModelRGB)
             return false;
+        if (s->profile == NULL)
+            return false;
+        if (s->linearizedCalibrated) {
+            size_t len;
+            long wtpt = icc_find_tag(s->profile, s->profileLen, "wtpt", &len);
+            long rXYZ = icc_find_tag(s->profile, s->profileLen, "rXYZ", &len);
+
+            if (wtpt < 0 || rXYZ < 0 || wtpt == rXYZ)
+                return false;
+            return true;
+        }
+        return s->primaries != NULL
+               ? icc_primaries_are_wide(s->primaries)
+               : icc_rgb_is_wide(s->profile, s->profileLen);
     }
-    return true;
+
+    /* An ordinary profile space answers from its colorants, and only an RGB
+       one has the primaries the measure needs. */
+    if (s->type != CGColorSpaceTypeICC || s->model != kCGColorSpaceModelRGB)
+        return false;
+    return s->profile != NULL
+           && (s->primaries != NULL
+               ? icc_primaries_are_wide(s->primaries)
+               : icc_rgb_is_wide(s->profile, s->profileLen));
 }
 
 bool CGColorSpaceUsesExtendedRange(CGColorSpaceRef space)
