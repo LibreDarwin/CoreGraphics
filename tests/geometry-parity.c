@@ -2767,7 +2767,7 @@ int main(void)
 
         /* CreateWithName.  Only names whose answers agree are recorded here.
            Apple resolves 44 of the fifty name constants and this step
-           resolves thirty-nine, so the other five would be a mismatch rather
+           resolves forty, so the other four would be a mismatch rather
            than a test and each one joins this family as its profile template
            lands.  What is recorded is the part that is not obvious from the
            name: that the device names answer the existing singletons, that a
@@ -2795,6 +2795,12 @@ int main(void)
                 "kCGColorSpaceGenericGray",
                 "kCGColorSpaceGenericGrayGamma2_2",
                 "kCGColorSpaceExtendedGray",
+                /* A profile of a shape of its own: a 1,936-byte 'spac'-class
+                   v2.2 profile whose components are XYZ coordinates, so it
+                   reports model XYZ rather than the monochrome and RGB models
+                   around it.  It is the one resolving name Apple marks
+                   extended that the spelling does not hint at. */
+                "kCGColorSpaceGenericXYZ",
                 /* Twelve of the template's fourteen profiles, which between
                    them carry seventeen names: the five extended-range aliases
                    take the same profile bytes as their base and differ only in
@@ -2952,6 +2958,14 @@ int main(void)
                    and neither wide nor extended until the extended name asks. */
                 { kCGColorSpaceModelMonochrome, 1, 6, 1, 0, 0 }, /* GenericGrayGamma2_2 */
                 { kCGColorSpaceModelMonochrome, 1, 6, 1, 1, 0 }, /* Extended Gray */
+                /* XYZ is a model of its own, not a monochrome or RGB space,
+                   which is the point of the row: three components and the same
+                   ICC type as the neighbouring profiles, but model 7.  Apple
+                   marks the space extended -- the flag is set in the name's
+                   resolution even though nothing about the spelling says so --
+                   and it cannot be wide gamut because an XYZ space has no
+                   primaries for the measure to read. */
+                { kCGColorSpaceModelXYZ, 3, 6, 1, 1, 0 },        /* GenericXYZ */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* DisplayP3 */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 1, 1 },        /* Extended DisplayP3 */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 0 },        /* ITUR_709 */

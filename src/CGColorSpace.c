@@ -225,6 +225,10 @@ static CGColorSpaceRef CGColorSpaceCreateNamedRGBV4(CFStringRef name);
    profiles of a rather different shape. */
 static CGColorSpaceRef CGColorSpaceCreateNamedGrayV2(CFStringRef name);
 
+/* And for the single XYZ name, whose profile is a 'spac'-class v2.2 one with
+   a shape of its own; the definition sits with the gray emitter. */
+static CGColorSpaceRef CGColorSpaceCreateNamedXYZV2(CFStringRef name);
+
 /* Declared ahead of its first use by put_gray_v2, which writes one row's
    sampled tone table with it; the definition sits with the HDR emitter and is
    shared with that template. */
@@ -434,7 +438,7 @@ CGColorSpaceRef CGColorSpaceCreatePattern(CGColorSpaceRef baseSpace)
 
    A NULL name and the empty string both return NULL rather than faulting.
 
-   Thirty-nine of the fifty name constants resolve here, where Apple resolves
+   Forty of the fifty name constants resolve here, where Apple resolves
    forty-four.  The identifier table is not the set of names this accepts and is
    not even most of it: sweeping every constant reachable through the API gives
    50 distinct names, of which Apple's 44 resolve and six return NULL.  Of those
@@ -447,7 +451,7 @@ CGColorSpaceRef CGColorSpaceCreatePattern(CGColorSpaceRef baseSpace)
    ColoredPattern -- so a lookup built from the identifier table alone would
    refuse eight names Apple accepts, among them kCGColorSpaceGenericGray, which
    reads as identifier 0 and so is indistinguishable from a name Apple has never
-   heard of.  The five names this step still refuses are the ones carrying a
+   heard of.  The four names this step still refuses are the ones carrying a
    profile it cannot emit yet.
 
    The three device names resolve to the file-scope singletons, so the named
@@ -519,6 +523,7 @@ CGColorSpaceRef CGColorSpaceCreateWithName(CFStringRef name)
        name they report and the extended flag they carry. */
     {
         CGColorSpaceRef gray = CGColorSpaceCreateNamedGrayV2(name);
+        CGColorSpaceRef xyz;
         CGColorSpaceRef hdr;
 
         /* Five more are gray rather than RGB, so they get their own template,
@@ -528,6 +533,11 @@ CGColorSpaceRef CGColorSpaceCreateWithName(CFStringRef name)
            alias.  Asked first because it is the shortest list of the three. */
         if (gray)
             return gray;
+        /* One more is XYZ, a 'spac'-class v2.2 profile of a shape of its
+           own, which the gray-scale emitter's sibling answers for. */
+        xyz = CGColorSpaceCreateNamedXYZV2(name);
+        if (xyz)
+            return xyz;
         /* Six more are HDR, in the PQ and HLG variants of the Display P3, 709
            and 2020 primaries, which share a third template between them. */
         hdr = CGColorSpaceCreateNamedHDR(name);
@@ -535,8 +545,8 @@ CGColorSpaceRef CGColorSpaceCreateWithName(CFStringRef name)
             return hdr;
     }
 
-    /* The names no template owns fall through to NULL: eleven of the fifty,
-       of which six are names Apple refuses too and the other five are the
+    /* The names no template owns fall through to NULL: ten of the fifty, of
+       which six are names Apple refuses too and the other four are the
        profiles this step cannot emit yet. */
     return CGColorSpaceCreateNamedRGBV4(name);
 }
@@ -2697,6 +2707,224 @@ static CGColorSpaceRef CGColorSpaceCreateNamedGrayV2(CFStringRef name)
     return NULL;
 }
 
+/* One 'mft2' lookup, shared by A2B0 and B2A0: a 3x3x2-entry table, so 9
+   lines of 6 channels.  It is the same in every Lab profile regardless of the
+   white point, which is what lets a 496-byte profile carry it at all, and the
+   XYZ profile kCGColorSpaceGenericXYZ resolves to carries the very same bytes
+   for its pair, so the one array serves both. */
+static const unsigned char lab_lut[124] = {
+    0x6d, 0x66, 0x74, 0x32, 0x00, 0x00, 0x00, 0x00, 0x03, 0x03, 0x02, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x02, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff,
+    0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff,
+    0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff,
+    0x00, 0x00, 0xff, 0xff,
+};
+
+/* The profile kCGColorSpaceGenericXYZ resolves to.  Recovered from the space
+   the name answers on Apple, and put_xyz_v2 below was checked against it by
+   rebuilding the profile and comparing it byte for byte.  It is a v2.2
+   profile of the 'spac' class rather than the 'mntr' every other named
+   profile here is: its colours are XYZ coordinates and its PCS is XYZ too,
+   and the pair of LUTs is the same 124-byte block lab_lut carries.
+
+   The count of its 'dscm' translations and the two fixed block lengths its
+   tags need; the white point, copyright and the sizes the 'desc' and the
+   LUT run to are fixed as well, which is what lets the profile be built to a
+   constant length. */
+enum {
+    CGICCXYZDscmRecords = 31,
+    CGICCXYZDescLength = 111,
+    CGICCXYZLutLength = 124
+};
+
+/* The header, as the profile carries it.  Two things are worth stopping at:
+   the device class is 'spac' rather than 'mntr', and the creation date is a
+   fixed 2000-02-14 rather than the moment of the call, so every rebuild is
+   byte-identical where a Lab profile stamps the time.  Bytes 0-3 hold the
+   profile size and are replaced from the length the builder works out, not
+   trusted from here. */
+static const unsigned char xyz_header[128] = {
+    0x00, 0x00, 0x07, 0x90, 0x61, 0x70, 0x70, 0x6c, 0x02, 0x20, 0x00, 0x00,
+    0x73, 0x70, 0x61, 0x63, 0x58, 0x59, 0x5a, 0x20, 0x58, 0x59, 0x5a, 0x20,
+    0x07, 0xd0, 0x00, 0x02, 0x00, 0x0e, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x00,
+    0x61, 0x63, 0x73, 0x70, 0x41, 0x50, 0x50, 0x4c, 0x00, 0x00, 0x00, 0x00,
+    0x61, 0x70, 0x70, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf6, 0xd6,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0xd3, 0x2d, 0x61, 0x70, 0x70, 0x6c,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+/* A legacy 'desc', like the Lab one but with a byte the others lack: after
+   the ASCII and the ten zero fields that follow it, offset 42 carries a 1
+   where the gray and RGB descriptions carry either a ScriptCode count based
+   on their text or nothing at all.  Everything from there to the end is
+   zero, so the whole record is stored rather than built. */
+static const unsigned char xyz_desc[111] = {
+    0x64, 0x65, 0x73, 0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14,
+    0x47, 0x65, 0x6e, 0x65, 0x72, 0x69, 0x63, 0x20, 0x58, 0x59, 0x5a, 0x20,
+    0x50, 0x72, 0x6f, 0x66, 0x69, 0x6c, 0x65, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00,
+};
+
+/* The thirty-one translations the profile's 'dscm' carries, in the order it
+   lists them.  Slovak first and Arabic last with nothing sorted in between,
+   Apple's own order, and each string is the XYZ counterpart of the same
+   language's entry on the gray and RGB lists rather than a shared copy. */
+static const struct cgs_mluc_record GenericXYZDscm[CGICCXYZDscmRecords] = {
+    { "skSK", "Všeobecný XYZ profil" },
+    { "daDK", "Generel XYZ-profil" },
+    { "caES", "Perfil XYZ genèric" },
+    { "viVN", "Cấu hình XYZ Chung" },
+    { "ptBR", "Perfil XYZ Genérico" },
+    { "ukUA", "Загальний профайл XYZ" },
+    { "frFU", "Profil générique XYZ" },
+    { "huHU", "Általános XYZ profil" },
+    { "zhTW", "通用XYZ色彩描述" },
+    { "koKR", "일반 XYZ 프로파일" },
+    { "nbNO", "Generisk XYZ-profil" },
+    { "csCZ", "Obecný XYZ profil" },
+    { "heIL", "פרופיל XYZ כללי" },
+    { "roRO", "Profil XYZ generic" },
+    { "deDE", "Allgemeines XYZ-Profil" },
+    { "itIT", "Profilo XYZ generico" },
+    { "svSE", "Generisk XYZ-profil" },
+    { "zhCN", "普通XYZ描述文件" },
+    { "jaJP", "一般 XYZ プロファイル" },
+    { "elGR", "Γενικό προφίλ XYZ" },
+    { "ptPO", "Perfil XYZ genérico" },
+    { "nlNL", "Algemeen XYZ-profiel" },
+    { "esES", "Perfil XYZ genérico" },
+    { "thTH", "โปรไฟล์ XYZ ทั่วไป" },
+    { "trTR", "Genel XYZ Profili" },
+    { "fiFI", "Yleinen XYZ-profiili" },
+    { "hrHR", "Generički XYZ profil" },
+    { "plPL", "Uniwersalny profil XYZ" },
+    { "ruRU", "Общий профиль XYZ" },
+    { "enUS", "Generic XYZ Profile" },
+    { "arEG", "ملف تعريف XYZ العام" }
+};
+
+/* Assemble the profile.  The blocks go out in table order -- the description,
+   the translation list, the copyright, the white point and the one LUT -- and
+   the two LUT tags point at the same block, so B2A0 owns it and A2B0 shares
+   it.  The description and header are whole stored bytes because neither is
+   the shape any other string emitter produces; the translation list is built
+   from its records like the gray and RGB ones are.  Everything is constant,
+   so the profile lands at exactly 1,936 bytes every time. */
+static unsigned char *put_xyz_v2(size_t *outLen)
+{
+    static const char *const tagNames[] = {
+        "desc", "dscm", "cprt", "wtpt", "B2A0", "A2B0"
+    };
+    enum { desc, dscm, cprt, wtpt, lut, blockCount };
+    enum { tagCount = sizeof tagNames / sizeof tagNames[0] };
+    static const int32_t xyz_wtpt[3] = { 0xf6d5, 0x10000, 0xd32c };
+    static const char xyz_cprt[] =
+        "Copyright 2007 Apple Inc., all rights reserved.";
+    size_t dscmLen = put_mluc_records(NULL, GenericXYZDscm,
+        CGICCXYZDscmRecords);
+    int32_t off[blockCount], len[blockCount];
+    size_t total;
+    unsigned char *p;
+    int i;
+
+    /* The blocks in table order -- description, translations, copyright,
+       white point and the one LUT -- each starting on the padding the last
+       one left.  The two LUT tags are not blocks of their own: B2A0 and A2B0
+       are both rows for the fourth block. */
+    off[desc] = (int32_t)icc_pad(CGICCTagTableOffset
+        + (size_t)tagCount * CGICCTagEntrySize);
+    len[desc] = CGICCXYZDescLength;
+    off[dscm] = (int32_t)icc_pad((size_t)off[desc] + (size_t)len[desc]);
+    len[dscm] = (int32_t)dscmLen;
+    off[cprt] = (int32_t)icc_pad((size_t)off[dscm] + (size_t)len[dscm]);
+    len[cprt] = (int32_t)(8 + sizeof xyz_cprt);
+    off[wtpt] = (int32_t)icc_pad((size_t)off[cprt] + (size_t)len[cprt]);
+    len[wtpt] = CGICCXYZLength;
+    off[lut] = (int32_t)icc_pad((size_t)off[wtpt] + (size_t)len[wtpt]);
+    len[lut] = CGICCXYZLutLength;
+    total = icc_pad((size_t)off[lut] + (size_t)len[lut]);
+
+    p = calloc(1, total);
+    if (!p)
+        return NULL;
+    memcpy(p, xyz_header, sizeof xyz_header);
+    put_be32(p, (int32_t)total);
+    put_be32(p + CGICCTagCountOffset, (uint32_t)tagCount);
+    for (i = 0; i < tagCount; i++) {
+        int b = i <= wtpt ? i : lut;
+        unsigned char *e = p + CGICCTagTableOffset + (size_t)i
+            * CGICCTagEntrySize;
+
+        memcpy(e, tagNames[i], 4);
+        put_be32(e + 4, (uint32_t)off[b]);
+        put_be32(e + 8, (uint32_t)len[b]);
+    }
+
+    memcpy(p + off[desc], xyz_desc, sizeof xyz_desc);
+    put_mluc_records(p + off[dscm], GenericXYZDscm, CGICCXYZDscmRecords);
+    put_text(p + off[cprt], xyz_cprt);
+    put_xyz_i32(p + off[wtpt], xyz_wtpt);
+    memcpy(p + off[lut], lab_lut, sizeof lab_lut);
+
+    *outLen = total;
+    return p;
+}
+
+static struct CGColorSpace *CGColorSpaceNamedXYZV2State;
+
+/* The one name, which the space reports as kCGColorSpaceGenericXYZ.  It is
+   built once and kept like the gray and RGB spaces, and flags one fact the
+   spelling cannot show: Apple calls it extended.  It is not wide gamut,
+   though -- an XYZ space has no primaries for the measure to read -- and
+   neither follows from the profile's bytes, so both are recorded here. */
+static CGColorSpaceRef CGColorSpaceCreateNamedXYZV2(CFStringRef name)
+{
+    struct CGColorSpace *s;
+    unsigned char *profile;
+    size_t len;
+
+    if (!CGColorSpaceNameEqualsASCII(name, "kCGColorSpaceGenericXYZ"))
+        return NULL;
+    if (CGColorSpaceNamedXYZV2State)
+        return CGColorSpaceNamedXYZV2State;
+    profile = put_xyz_v2(&len);
+    if (!profile)
+        return NULL;
+    s = calloc(1, sizeof *s);
+    if (!s) {
+        free(profile);
+        return NULL;
+    }
+    s->immortal = true;
+    /* An XYZ space is its own model, kCGColorSpaceModelXYZ, not an RGB one:
+       Apple reports the same three components and the same ICC type, and
+       model 7 is the difference a caller can see. */
+    s->model = kCGColorSpaceModelXYZ;
+    s->type = CGColorSpaceTypeICC;
+    s->ncomp = 3;
+    s->name = "kCGColorSpaceGenericXYZ";
+    s->extended = true;
+    s->profile = profile;
+    s->profileLen = len;
+    CGColorSpaceNamedXYZV2State = s;
+    return s;
+}
+
 CGColorSpaceRef CGColorSpaceCreateCalibratedRGB(const CGFloat
     whitePoint[CG_NONNULL_ARRAY 3], const CGFloat blackPoint[__nullable 3],
     const CGFloat gamma[__nullable 3], const CGFloat matrix[__nullable 9])
@@ -3742,22 +3970,7 @@ enum {
         0x49, 0x6e, 0x63, 0x2e, 0x2c, 0x20, 0x32, 0x30, 0x32, 0x36, 0x00,
     };
 
-    /* One 'mft2' lookup, shared by A2B0 and B2A0: a 3x3x2-entry table, so 9
-       lines of 6 channels.  It is the same in every Lab profile regardless of
-       the white point, which is what lets a 496-byte profile carry it at all. */
-    static const unsigned char lab_lut[124] = {
-        0x6d, 0x66, 0x74, 0x32, 0x00, 0x00, 0x00, 0x00, 0x03, 0x03, 0x02, 0x00,
-        0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
-        0x00, 0x02, 0x00, 0x02, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff,
-        0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff,
-        0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff,
-        0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff,
-        0x00, 0x00, 0xff, 0xff,
-    };
+    
 
 static void put_be16(unsigned char *p, unsigned v)
 {

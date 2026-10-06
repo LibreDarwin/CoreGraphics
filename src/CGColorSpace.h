@@ -25,10 +25,10 @@
      - CreateLinearized, CreateExtended and their Extended variants,
      - CreateICCBased, CreateWithICCData, CreateWithICCProfile,
        CreateWithColorSyncProfile, CreateWithURL, CreatePlatformProfile,
-     - CreateWithID, and CreateWithName for all but eleven of the fifty name
-       constants: the thirty-nine it does accept are assembled here, five of
-       the eleven resolve on Apple to embedded profiles this step cannot
-       emit, and six Apple refuses as well.
+     - CreateWithID, and CreateWithName for all but ten of the fifty name
+       constants: the forty it does accept are assembled here, four of the
+       ten resolve on Apple to embedded profiles this step cannot emit,
+       and six Apple refuses as well.
 
    The three calibrated spaces do synthesise a profile, and the size varies
    with the shape of the request: 380 bytes for a calibrated gray, 416 to 528
@@ -101,7 +101,7 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
 
    The names that resolve here are of two kinds.  Five need no profile of
    their own -- the three device names, kCGColorSpaceColoredPattern and
-   kCGColorSpaceGenericLab -- and the thirty-four described below are
+   kCGColorSpaceGenericLab -- and the thirty-five described below are
    assembled from recovered constants.  Every other name yields NULL, because
    either it resolves to a space carrying an embedded profile this step cannot
    emit yet or Apple refuses it too.  That set is neither the identifier table
@@ -238,7 +238,18 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
    other two are 2,020 and 356.  It reports one component and no primaries and
    is not wide gamut, like the rest.
 
-   Every other name returns NULL for now; eleven remain, of which five resolve
+   kCGColorSpaceGenericXYZ is a third shape: a 1,936-byte v2.2 profile of
+   the 'spac' class rather than the 'mntr' class every other profile here
+   answers with, because its components are XYZ coordinates and its PCS is
+   XYZ too.  It carries the same six blocks a named profile holds -- the
+   description, a translation list, the copyright, the white point and the
+   two LUTs -- where the LUT pair is the same 124-byte block the Lab profiles
+   share, and its creation date is fixed rather than stamped at the call.
+   It reports three components and model XYZ rather than RGB, and it is
+   extended but not wide gamut: the extended-range flag is on, and a space
+   with no primaries has nothing for the gamut measure to read.
+
+   Every other name returns NULL for now; ten remain, of which four resolve
    on Apple to embedded profiles the rest of this file's constructors do not
    yet assemble and six Apple refuses as well. */
 CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateWithName(
