@@ -2767,13 +2767,12 @@ int main(void)
 
         /* CreateWithName.  Only names whose answers agree are recorded here.
            Apple resolves 44 of the fifty name constants and this step
-           resolves forty-one, so the other three would be a mismatch rather
-           than a test and each one joins this family as its profile template
-           lands.  What is recorded is the part that is not obvious from the
-           name: that the device names answer the existing singletons, that a
-           pattern name builds something fresh every call, and that the generic
-           Lab name resolves to precisely the profile CreateLab already
-           emits. */
+           resolves the same forty-four, so every name it used to refuse has a
+           template now and nothing Apple resolves is left as a gap.  What is
+           recorded is the part that is not obvious from the name: that the
+           device names answer the existing singletons, that a pattern name
+           builds something fresh every call, and that the generic Lab name
+           resolves to precisely the profile CreateLab already emits. */
         {
             /* The names that resolve in both. */
             static const char *const resolves[] = {
@@ -2808,6 +2807,17 @@ int main(void)
                    D50.  Nothing about the name is overridden the way the XYZ
                    one is, so it reports a plain four-component space. */
                 "kCGColorSpaceGenericCMYK",
+                /* And the three names this step used to refuse: the classic
+                   v2.1 'mntr' profiles -- IEC 61966-2.1 sRGB and the Adobe
+                   RGB (1998) space -- and the extended-range alias of the
+                   first, which takes the exact sRGB bytes and differs only in
+                   the name and the range flag, exactly as the extended-range
+                   aliases below do.  The profiles answer the same type as the
+                   v4 ones around them even though the headers carry no sign
+                   of it. */
+                "kCGColorSpaceSRGB",
+                "kCGColorSpaceAdobeRGB1998",
+                "kCGColorSpaceExtendedSRGB",
                 /* Twelve of the template's fourteen profiles, which between
                    them carry seventeen names: the five extended-range aliases
                    take the same profile bytes as their base and differ only in
@@ -2980,6 +2990,17 @@ int main(void)
                    nor wide, so the row is the plainest four-component one: no
                    overrides at all. */
                 { kCGColorSpaceModelCMYK, 4, 6, 1, 0, 0 },       /* GenericCMYK */
+                /* The classic RGB spaces at last: same type as the v4
+                   profiles around them, not called wide gamut.  SRGB's
+                   primaries are Rec. 709's, so the wide answer is the false
+                   of the 709 space below rather than the true of the wider
+                   ones.  Adobe RGB (1998) is the one that is wide, and the
+                   extended alias of SRGB takes the sRGB row widened by the
+                   range flag, which overrides the primaries' own answer --
+                   the same flip the Extended Linear spaces below make. */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 0 },        /* SRGB */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* AdobeRGB1998 */
+                { kCGColorSpaceModelRGB, 3, 6, 1, 1, 1 },        /* ExtendedSRGB */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* DisplayP3 */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 1, 1 },        /* Extended DisplayP3 */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 0 },        /* ITUR_709 */

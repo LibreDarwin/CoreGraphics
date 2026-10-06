@@ -233,6 +233,14 @@ static CGColorSpaceRef CGColorSpaceCreateNamedXYZV2(CFStringRef name);
    with a shape of its own; the definition sits with the gray emitter. */
 static CGColorSpaceRef CGColorSpaceCreateNamedCMYKV2(CFStringRef name);
 
+/* And for the three names of the classic v2.1 RGB spaces -- kCGColorSpaceSRGB,
+   kCGColorSpaceAdobeRGB1998 and the extended-range alias of the first,
+   kCGColorSpaceExtendedSRGB -- which resolve to two profiles of a shape of
+   their own: the legacy-string 'mntr' form the identifier table has carried
+   all along, built by a small table-driven emitter of its own.  The definition
+   sits with that emitter, after the gray template. */
+static CGColorSpaceRef CGColorSpaceCreateNamedSRGBV2(CFStringRef name);
+
 /* Declared ahead of its first use by put_gray_v2, which writes one row's
    sampled tone table with it; the definition sits with the HDR emitter and is
    shared with that template. */
@@ -442,21 +450,24 @@ CGColorSpaceRef CGColorSpaceCreatePattern(CGColorSpaceRef baseSpace)
 
    A NULL name and the empty string both return NULL rather than faulting.
 
-   Forty-one of the fifty name constants resolve here, where Apple resolves
+   Forty-four of the fifty name constants resolve here, matching Apple's
    forty-four.  The identifier table is not the set of names this accepts and is
    not even most of it: sweeping every constant reachable through the API gives
    50 distinct names, of which Apple's 44 resolve and six return NULL.  Of those
-   44, the table's 32 all resolve under their own names, eight more resolve with
-   no identifier at all, and four are second spellings that reach an identifier
-   through a sibling -- the 2020 PQ and HLG names, and the two EOTF names.  The
-   six that return NULL are Pattern, Unnamed, Invalid, and the three legacy
-   GenericGamma2_2 / GenericCMYKLinear spellings.  The eight with no identifier
-   are the three device names, the four generic profiles the table omits, and
-   ColoredPattern -- so a lookup built from the identifier table alone would
-   refuse eight names Apple accepts, among them kCGColorSpaceGenericGray, which
-   reads as identifier 0 and so is indistinguishable from a name Apple has never
-   heard of.  The three names this step still refuses are the ones carrying a
-   profile it cannot emit yet.
+   44, the table's 32 all resolve under their own names, eight more resolve
+   with no identifier at all, and four are second spellings that reach an
+   identifier through a sibling -- the 2020 PQ and HLG names, and the two EOTF
+   names.  The six that return NULL are Pattern, Unnamed, Invalid, and the
+   three legacy GenericGamma2_2 / GenericCMYKLinear spellings.  The eight with
+   no identifier are the three device names, the four generic profiles the
+   table omits, and ColoredPattern -- so a lookup built from the identifier
+   table alone would refuse eight names Apple accepts, among them
+   kCGColorSpaceGenericGray, which reads as identifier 0 and so is
+   indistinguishable from a name Apple has never heard of.  The three names
+   this step used to refuse -- kCGColorSpaceSRGB, kCGColorSpaceAdobeRGB1998
+   and kCGColorSpaceExtendedSRGB -- are in the table from the start, filed
+   under identifiers 15, 14 and 16; all that was missing was the profile they
+   resolve to, emitted by the template that closes this file.
 
    The three device names resolve to the file-scope singletons, so the named
    space and the CreateDeviceX() space are one object: both return the same
@@ -530,6 +541,7 @@ CGColorSpaceRef CGColorSpaceCreateWithName(CFStringRef name)
         CGColorSpaceRef xyz;
         CGColorSpaceRef cmyk;
         CGColorSpaceRef hdr;
+        CGColorSpaceRef srgb;
 
         /* Five more are gray rather than RGB, so they get their own template,
            which holds three profiles: the linear v2.1 one carrying two names,
@@ -553,11 +565,18 @@ CGColorSpaceRef CGColorSpaceCreateWithName(CFStringRef name)
         hdr = CGColorSpaceCreateNamedHDR(name);
         if (hdr)
             return hdr;
+        /* And three are the classic v2.1 RGB spaces -- kCGColorSpaceSRGB, the
+           Adobe RGB 1998 space, and the extended alias of the first, which
+           takes the same profile bytes -- the last names Apple resolves and so
+           asked last, after the templates that answer to all the other names. */
+        srgb = CGColorSpaceCreateNamedSRGBV2(name);
+        if (srgb)
+            return srgb;
     }
 
-    /* The names no template owns fall through to NULL: nine of the fifty, of
-       which six are names Apple refuses too and the other three are the
-       profiles this step cannot emit yet. */
+    /* The names no template owns fall through: six of the fifty are names
+       Apple refuses too, and every one of the forty-four it resolves is now
+       built by a template above. */
     return CGColorSpaceCreateNamedRGBV4(name);
 }
 
@@ -2712,6 +2731,449 @@ static CGColorSpaceRef CGColorSpaceCreateNamedGrayV2(CFStringRef name)
         s->profile = profile;
         s->profileLen = len;
         CGColorSpaceNamedGrayV2State[i] = s;
+        return s;
+    }
+    return NULL;
+}
+
+/* The three names Apple resolves last, on a second v2 shape of their own.
+
+   kCGColorSpaceSRGB and kCGColorSpaceAdobeRGB1998 -- and the extended-range
+   alias of the first, kCGColorSpaceExtendedSRGB, which takes the same profile
+   bytes and differs only in the name and the range flag -- are the three
+   names this step used to refuse.  Neither resolves like the spaces above:
+   each is a classic v2.1 'mntr' profile, the form the identifier table has
+   carried all along, and both spell their strings in the legacy types, which
+   is what makes them a different shape from the v4 RGB template even though
+   they are RGB spaces too.  Everything below was recovered from the profile
+   each name resolves to, and put_v2_profile was checked against both by
+   rebuilding each and comparing it byte for byte.
+
+   Several things about the two make the template different from the others on
+   this list.  The headers are stored rather than composed, because a real
+   profile carries dates and attributes nothing here builds should invent, and
+   because the two headers differ in the fields a composed one would spend
+   effort on: the sRGB profile is a 'Lino' space created by Hewlett-Packard
+   and Microsoft with the MSFT/HP renderer fields stamped as the standard
+   mandates, while Adobe's is an 'ADBE' space Apple has filed under APPL.  Each
+   header's only live field is its size, which the emitter writes over the
+   stored byte.
+
+   The sRGB profile's tag table is the longest in the set -- seventeen tags,
+   with the 'view', 'lumi', 'meas' and 'tech' blocks of the display-industry
+   profile that the others do not carry, and with three 'desc' blocks holding
+   the IEC spelling of the space and its preferred viewing conditions.  Most
+   of the seventeen tags are stored whole, but not the interesting three: the
+   red, green and blue tone curves are ONE shared sampled curve, the 1,024
+   entries of which are the very table cgsGrayGamma22Tone already holds.  The
+   sRGB transfer function, quantised the same way, is the gamma 2.2 one; the
+   row above is reused rather than transcribed, and the emitter places a block
+   once for however many tags point at it, which is why the three curve tags
+   share the block without moving it.  The six remaining blocks are the
+   quantised 'XYZ ' words of the white point, the black point, the three
+   colorants and the luminance of the preferred profile, spelled below exactly
+   as the profile carries them.
+
+   Adobe's is the smaller profile and is entirely derived: the copyright and
+   description as 'text' and 'desc', the black and white points and the three
+   colorants as quantised 'XYZ ' words, and the three gamma 2.2 curves as what
+   put_icc_curve writes -- 0x233, the u8Fixed8 spelling of 2.199, which is the
+   value that makes the space 2.2's.  Nothing in it is stored, and the block
+   table is the only place its ten tags get their bytes. */
+
+/* The two headers the profiles resolve to, spelled byte for byte as they
+   carry them.  CGICCHeaderLength is the whole 128-byte header, so each also
+   fixes the version, the class, the data colour space, the dates, the
+   renderer and the illuminant; a build only rewrites the size. */
+static const unsigned char SRGBHeader[CGICCHeaderLength] = {
+    0x00, 0x00, 0x0c, 0x48, 0x4c, 0x69, 0x6e, 0x6f, 0x02, 0x10, 0x00, 0x00,
+    0x6d, 0x6e, 0x74, 0x72, 0x52, 0x47, 0x42, 0x20, 0x58, 0x59, 0x5a, 0x20,
+    0x07, 0xce, 0x00, 0x02, 0x00, 0x09, 0x00, 0x06, 0x00, 0x31, 0x00, 0x00,
+    0x61, 0x63, 0x73, 0x70, 0x4d, 0x53, 0x46, 0x54, 0x00, 0x00, 0x00, 0x00,
+    0x49, 0x45, 0x43, 0x20, 0x73, 0x52, 0x47, 0x42, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf6, 0xd6,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0xd3, 0x2d, 0x48, 0x50, 0x20, 0x20,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+static const unsigned char AdobeHeader[CGICCHeaderLength] = {
+    0x00, 0x00, 0x02, 0x30, 0x41, 0x44, 0x42, 0x45, 0x02, 0x10, 0x00, 0x00,
+    0x6d, 0x6e, 0x74, 0x72, 0x52, 0x47, 0x42, 0x20, 0x58, 0x59, 0x5a, 0x20,
+    0x07, 0xd0, 0x00, 0x08, 0x00, 0x0b, 0x00, 0x13, 0x00, 0x33, 0x00, 0x3b,
+    0x61, 0x63, 0x73, 0x70, 0x41, 0x50, 0x50, 0x4c, 0x00, 0x00, 0x00, 0x00,
+    0x6e, 0x6f, 0x6e, 0x65, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf6, 0xd6,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0xd3, 0x2d, 0x41, 0x44, 0x42, 0x45,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+/* The sRGB words, and nothing else, which is the principle of the stored
+   side: a block is copied whole when nothing here could rebuild the byte it
+   would differ on.  The five 'XYZ ' spellings are derived instead. */
+static const unsigned char SRGBCprt[51] = {
+    0x74, 0x65, 0x78, 0x74, 0x00, 0x00, 0x00, 0x00, 0x43, 0x6f, 0x70, 0x79,
+    0x72, 0x69, 0x67, 0x68, 0x74, 0x20, 0x28, 0x63, 0x29, 0x20, 0x31, 0x39,
+    0x39, 0x38, 0x20, 0x48, 0x65, 0x77, 0x6c, 0x65, 0x74, 0x74, 0x2d, 0x50,
+    0x61, 0x63, 0x6b, 0x61, 0x72, 0x64, 0x20, 0x43, 0x6f, 0x6d, 0x70, 0x61,
+    0x6e, 0x79, 0x00,
+};
+static const unsigned char SRGBDesc[108] = {
+    0x64, 0x65, 0x73, 0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12,
+    0x73, 0x52, 0x47, 0x42, 0x20, 0x49, 0x45, 0x43, 0x36, 0x31, 0x39, 0x36,
+    0x36, 0x2d, 0x32, 0x2e, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x12, 0x73, 0x52, 0x47, 0x42, 0x20, 0x49, 0x45,
+    0x43, 0x36, 0x31, 0x39, 0x36, 0x36, 0x2d, 0x32, 0x2e, 0x31, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+static const unsigned char SRGBDmnd[112] = {
+    0x64, 0x65, 0x73, 0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16,
+    0x49, 0x45, 0x43, 0x20, 0x68, 0x74, 0x74, 0x70, 0x3a, 0x2f, 0x2f, 0x77,
+    0x77, 0x77, 0x2e, 0x69, 0x65, 0x63, 0x2e, 0x63, 0x68, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16, 0x49, 0x45, 0x43,
+    0x20, 0x68, 0x74, 0x74, 0x70, 0x3a, 0x2f, 0x2f, 0x77, 0x77, 0x77, 0x2e,
+    0x69, 0x65, 0x63, 0x2e, 0x63, 0x68, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+};
+static const unsigned char SRGBDmdd[136] = {
+    0x64, 0x65, 0x73, 0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2e,
+    0x49, 0x45, 0x43, 0x20, 0x36, 0x31, 0x39, 0x36, 0x36, 0x2d, 0x32, 0x2e,
+    0x31, 0x20, 0x44, 0x65, 0x66, 0x61, 0x75, 0x6c, 0x74, 0x20, 0x52, 0x47,
+    0x42, 0x20, 0x63, 0x6f, 0x6c, 0x6f, 0x75, 0x72, 0x20, 0x73, 0x70, 0x61,
+    0x63, 0x65, 0x20, 0x2d, 0x20, 0x73, 0x52, 0x47, 0x42, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2e, 0x49, 0x45, 0x43,
+    0x20, 0x36, 0x31, 0x39, 0x36, 0x36, 0x2d, 0x32, 0x2e, 0x31, 0x20, 0x44,
+    0x65, 0x66, 0x61, 0x75, 0x6c, 0x74, 0x20, 0x52, 0x47, 0x42, 0x20, 0x63,
+    0x6f, 0x6c, 0x6f, 0x75, 0x72, 0x20, 0x73, 0x70, 0x61, 0x63, 0x65, 0x20,
+    0x2d, 0x20, 0x73, 0x52, 0x47, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+};
+static const unsigned char SRGBVued[134] = {
+    0x64, 0x65, 0x73, 0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2c,
+    0x52, 0x65, 0x66, 0x65, 0x72, 0x65, 0x6e, 0x63, 0x65, 0x20, 0x56, 0x69,
+    0x65, 0x77, 0x69, 0x6e, 0x67, 0x20, 0x43, 0x6f, 0x6e, 0x64, 0x69, 0x74,
+    0x69, 0x6f, 0x6e, 0x20, 0x69, 0x6e, 0x20, 0x49, 0x45, 0x43, 0x36, 0x31,
+    0x39, 0x36, 0x36, 0x2d, 0x32, 0x2e, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x52, 0x65, 0x66, 0x65, 0x72,
+    0x65, 0x6e, 0x63, 0x65, 0x20, 0x56, 0x69, 0x65, 0x77, 0x69, 0x6e, 0x67,
+    0x20, 0x43, 0x6f, 0x6e, 0x64, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x20, 0x69,
+    0x6e, 0x20, 0x49, 0x45, 0x43, 0x36, 0x31, 0x39, 0x36, 0x36, 0x2d, 0x32,
+    0x2e, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00,
+};
+static const unsigned char SRGBView[36] = {
+    0x76, 0x69, 0x65, 0x77, 0x00, 0x00, 0x00, 0x00, 0x00, 0x13, 0xa4, 0xfe,
+    0x00, 0x14, 0x5f, 0x2e, 0x00, 0x10, 0xcf, 0x14, 0x00, 0x03, 0xed, 0xcc,
+    0x00, 0x04, 0x13, 0x0b, 0x00, 0x03, 0x5c, 0x9e, 0x00, 0x00, 0x00, 0x01,
+};
+static const unsigned char SRGBMeas[36] = {
+    0x6d, 0x65, 0x61, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x8f, 0x00, 0x00, 0x00, 0x02,
+};
+static const unsigned char SRGBTech[12] = {
+    0x73, 0x69, 0x67, 0x20, 0x00, 0x00, 0x00, 0x00, 0x43, 0x52, 0x54, 0x20,
+};
+
+/* The sRGB colorants and the rest, as the profile quantises them: the D65
+   white the space is defined in terms of, a black point of zero -- stored,
+   since 'XYZ ' spells it out -- the primaries sRGB resolves to (Rec. 709) and
+   the luminance of the 80 cd/m2 viewing condition the 'view' block names. */
+static const int32_t SRGBWtpt[3] = { 0xf351, 0x10000, 0x116cc };
+static const int32_t SRGBBkpt[3] = { 0, 0, 0 };
+static const int32_t SRGBRxyz[3] = { 0x6fa2, 0x38f5, 0x390 };
+static const int32_t SRGBGxyz[3] = { 0x6299, 0xb785, 0x18da };
+static const int32_t SRGBBxyz[3] = { 0x24a0, 0xf84, 0xb6cf };
+static const int32_t SRGBLumi[3] = { 0x4c0956, 0x500000, 0x571fe7 };
+
+/* The Adobe words: the same D65 white and zero black point, and the wider
+   Adobe RGB (1998) primaries. */
+static const int32_t AdobeWtpt[3] = { 0xf351, 0x10000, 0x116cc };
+static const int32_t AdobeBkpt[3] = { 0, 0, 0 };
+static const int32_t AdobeRxyz[3] = { 0x9c18, 0x4fa5, 0x4fc };
+static const int32_t AdobeGxyz[3] = { 0x348d, 0xa02c, 0xf95 };
+static const int32_t AdobeBxyz[3] = { 0x2631, 0x102f, 0xbe9c };
+
+/* The one curve Adobe's three tone tags share the form of: a u8Fixed8 gamma
+   of 2.199 (0x233), the spelling that makes the space 2.2. */
+static const struct cgs_icc_curve AdobeCurve = { 0, 0, 0x233, 0, { 0 } };
+
+/* One row of the tag table: the tag's four bytes and which block carries the
+   value.  With one row per tag and one entry per block, a tag never points
+   where no block is, and the table and the block list cannot drift. */
+struct cgs_v2_row {
+    const char *tag;
+    int block;
+};
+
+/* What a block is made of.  Every kind maps to one of the writer helpers, so
+   the emitter's work is laying the blocks out, and a block of any kind can be
+   shared by several rows -- the sRGB tone curve tag's reason for existing. */
+enum cgs_v2_block_kind {
+    /* Stored whole: bytes nothing here rebuilds from a string. */
+    v2BlockStored,
+    /* An 'XYZ ' block of three already-quantised s15Fixed16 words. */
+    v2BlockXYZ,
+    /* A one-entry gamma curve, put_icc_curve's non-parametric form. */
+    v2BlockCurv,
+    /* A sampled curve, put_curve_sampled's count-and-values form. */
+    v2BlockSampled,
+    /* A 'text' block, put_text's eight-byte header and NUL-terminated
+       string. */
+    v2BlockText,
+    /* A 'desc' block, built the way put_desc writes it. */
+    v2BlockDesc
+};
+
+struct cgs_v2_block {
+    enum cgs_v2_block_kind kind;
+    const void *data;    /* stored bytes, words, a curve, a table, a string */
+    size_t len;          /* the stored length, the sampled count, or the
+                            whole target length for a 'desc' block */
+    int scriptCode;      /* the ScriptCode half of a 'desc' block */
+};
+
+struct cgs_v2_profile {
+    const unsigned char *header;
+    const struct cgs_v2_block *block;
+    int blkCount;
+    const struct cgs_v2_row *row;
+    int rowCount;
+};
+
+/* What a block's bytes would measure, used to lay the blocks out before
+   anything is written. */
+static size_t cgs_v2_block_length(const struct cgs_v2_profile *v, int b)
+{
+    const struct cgs_v2_block *blk = &v->block[b];
+
+    switch (blk->kind) {
+    case v2BlockStored:
+        return blk->len;
+    case v2BlockXYZ:
+        return CGICCXYZLength;
+    case v2BlockCurv:
+        /* 8 bytes of 'curv' header, one u8Fixed8 gamma. */
+        return 12 + 2;
+    case v2BlockSampled:
+        return 12 + 2 * blk->len;
+    case v2BlockText:
+        return 8 + strlen(blk->data) + 1;
+    case v2BlockDesc:
+        return blk->len;
+    }
+
+    /* Compilers cannot see that the switch is total over a fixed enum. */
+    return 0;
+}
+
+static void cgs_v2_block_put(unsigned char *p, const struct cgs_v2_profile *v,
+    int b)
+{
+    const struct cgs_v2_block *blk = &v->block[b];
+
+    switch (blk->kind) {
+    case v2BlockStored:
+        memcpy(p, blk->data, blk->len);
+        break;
+    case v2BlockXYZ:
+        put_xyz_i32(p, blk->data);
+        break;
+    case v2BlockCurv:
+        put_icc_curve(p, blk->data);
+        break;
+    case v2BlockSampled:
+        put_curve_sampled(p, blk->data, blk->len);
+        break;
+    case v2BlockText:
+        put_text(p, blk->data);
+        break;
+    case v2BlockDesc:
+        put_desc(p, blk->data, blk->scriptCode, blk->len);
+        break;
+    }
+}
+
+/* Build one of the two profiles: the tag table at the top of the page, then
+   each block placed once at whatever offset the rows before it have reached,
+   rounded up to four as every tag offset must be.  Blocks are placed in the
+   order their first row names them, so a block two rows point at -- the one
+   case here, the sRGB tone curve -- takes the place of its first tag and the
+   later rows pick that same offset up; the shared block is never laid twice,
+   which is what keeps the shorter profile's arithmetic from shifting.  Zero
+   the reserved fields are not: the stored blocks and the writers all carry
+   their own, and the header ends up byte for byte what each profile resolves
+   to except the size, which is patched at the end. */
+static unsigned char *put_v2_profile(const struct cgs_v2_profile *v,
+    size_t *outLen)
+{
+    int32_t off[15];
+    unsigned char laid[15];
+    unsigned char *p;
+    size_t len;
+    int i;
+
+    memset(laid, 0, sizeof laid);
+    len = CGICCTagTableOffset + (size_t)v->rowCount * CGICCTagEntrySize;
+    for (i = 0; i < v->rowCount; i++) {
+        int b = v->row[i].block;
+
+        if (laid[b])
+            continue;
+        off[b] = (int32_t)icc_pad(len);
+        len = (size_t)off[b] + cgs_v2_block_length(v, b);
+        laid[b] = 1;
+    }
+    p = malloc(len);
+    if (!p)
+        return NULL;
+    memcpy(p, v->header, CGICCHeaderLength);
+    put_be32(p, (int32_t)len);
+    put_be32(p + CGICCTagCountOffset, v->rowCount);
+    memset(laid, 0, sizeof laid);
+    for (i = 0; i < v->rowCount; i++) {
+        int b = v->row[i].block;
+
+        if (laid[b])
+            continue;
+        cgs_v2_block_put(p + off[b], v, b);
+        laid[b] = 1;
+    }
+    for (i = 0; i < v->rowCount; i++) {
+        unsigned char *t = p + CGICCTagTableOffset +
+            (size_t)i * CGICCTagEntrySize;
+
+        memcpy(t, v->row[i].tag, 4);
+        put_be32(t + 4, off[v->row[i].block]);
+        put_be32(t + 8, (int32_t)cgs_v2_block_length(v, v->row[i].block));
+    }
+    *outLen = len;
+    return p;
+}
+
+/* The sRGB profile's seventeen tags: the six stored industry blocks and four
+   'XYZ ' words in the profile's own order, then the three tone curve tags all
+   pointing at the one shared sampled block, block 14. */
+static const struct cgs_v2_row SRGBRow[17] = {
+    { "cprt", 0 }, { "desc", 1 }, { "wtpt", 2 }, { "bkpt", 3 },
+    { "rXYZ", 4 }, { "gXYZ", 5 }, { "bXYZ", 6 }, { "dmnd", 7 },
+    { "dmdd", 8 }, { "vued", 9 }, { "view", 10 }, { "lumi", 11 },
+    { "meas", 12 }, { "tech", 13 }, { "rTRC", 14 }, { "gTRC", 14 },
+    { "bTRC", 14 },
+};
+
+/* The blocks behind those rows, in the order the rows first reach them.  The
+   only sampled block is the shared one, and it is the gamma 2.2 curve the
+   gray template already carries, reused so the 2,060 bytes are not transcribed
+   a second time. */
+static const struct cgs_v2_block SRGBBlock[15] = {
+    { v2BlockStored, SRGBCprt, sizeof SRGBCprt, 0 },
+    { v2BlockStored, SRGBDesc, sizeof SRGBDesc, 0 },
+    { v2BlockXYZ, SRGBWtpt, 0, 0 },
+    { v2BlockXYZ, SRGBBkpt, 0, 0 },
+    { v2BlockXYZ, SRGBRxyz, 0, 0 },
+    { v2BlockXYZ, SRGBGxyz, 0, 0 },
+    { v2BlockXYZ, SRGBBxyz, 0, 0 },
+    { v2BlockStored, SRGBDmnd, sizeof SRGBDmnd, 0 },
+    { v2BlockStored, SRGBDmdd, sizeof SRGBDmdd, 0 },
+    { v2BlockStored, SRGBVued, sizeof SRGBVued, 0 },
+    { v2BlockStored, SRGBView, sizeof SRGBView, 0 },
+    { v2BlockXYZ, SRGBLumi, 0, 0 },
+    { v2BlockStored, SRGBMeas, sizeof SRGBMeas, 0 },
+    { v2BlockStored, SRGBTech, sizeof SRGBTech, 0 },
+    { v2BlockSampled, cgsGrayGamma22Tone, 1024, 0 },
+};
+
+static const struct cgs_v2_profile SRGBProfile = {
+    SRGBHeader, SRGBBlock, 15, SRGBRow, 17
+};
+
+/* The Adobe profile's ten tags, and the blocks every one of them derives
+   from: the copyright and description as the two string writers spell them,
+   the points and colorants as 'XYZ ' words, and the three tone tags as the
+   one u8Fixed8 gamma.  Nothing here is stored. */
+static const struct cgs_v2_row AdobeRow[10] = {
+    { "cprt", 0 }, { "desc", 1 }, { "wtpt", 2 }, { "bkpt", 3 },
+    { "rTRC", 4 }, { "gTRC", 5 }, { "bTRC", 6 }, { "rXYZ", 7 },
+    { "gXYZ", 8 }, { "bXYZ", 9 },
+};
+
+static const struct cgs_v2_block AdobeBlock[10] = {
+    { v2BlockText, "Copyright 2000 Adobe Systems Incorporated", 0, 0 },
+    { v2BlockDesc, "Adobe RGB (1998)", 107, 0 },
+    { v2BlockXYZ, AdobeWtpt, 0, 0 },
+    { v2BlockXYZ, AdobeBkpt, 0, 0 },
+    { v2BlockCurv, &AdobeCurve, 0, 0 },
+    { v2BlockCurv, &AdobeCurve, 0, 0 },
+    { v2BlockCurv, &AdobeCurve, 0, 0 },
+    { v2BlockXYZ, AdobeRxyz, 0, 0 },
+    { v2BlockXYZ, AdobeGxyz, 0, 0 },
+    { v2BlockXYZ, AdobeBxyz, 0, 0 },
+};
+
+static const struct cgs_v2_profile AdobeProfile = {
+    AdobeHeader, AdobeBlock, 10, AdobeRow, 10
+};
+
+/* The three names, two profiles: the extended alias of sRGB takes the exact
+   sRGB bytes and is told apart only by the name it reports and the range flag
+   it carries. */
+static struct CGColorSpace *CGColorSpaceNamedSRGBV2State[3];
+
+enum { CGColorSpaceNamedSRGBV2Count = 3 };
+
+static const struct {
+    const char *name;
+    const struct cgs_v2_profile *profile;
+    bool extended;
+} CGColorSpaceNamedSRGBV2[CGColorSpaceNamedSRGBV2Count] = {
+    { "kCGColorSpaceSRGB", &SRGBProfile, false },
+    { "kCGColorSpaceAdobeRGB1998", &AdobeProfile, false },
+    { "kCGColorSpaceExtendedSRGB", &SRGBProfile, true },
+};
+
+static CGColorSpaceRef CGColorSpaceCreateNamedSRGBV2(CFStringRef name)
+{
+    struct CGColorSpace *s;
+    unsigned char *profile;
+    size_t len;
+    int i;
+
+    for (i = 0; i < CGColorSpaceNamedSRGBV2Count; i++) {
+        if (!CGColorSpaceNameEqualsASCII(name, CGColorSpaceNamedSRGBV2[i].name))
+            continue;
+        if (CGColorSpaceNamedSRGBV2State[i])
+            return CGColorSpaceNamedSRGBV2State[i];
+        profile = put_v2_profile(CGColorSpaceNamedSRGBV2[i].profile, &len);
+        if (!profile)
+            return NULL;
+        s = calloc(1, sizeof *s);
+        if (!s) {
+            free(profile);
+            return NULL;
+        }
+        s->immortal = true;
+        s->model = kCGColorSpaceModelRGB;
+        s->type = CGColorSpaceTypeICC;
+        s->ncomp = 3;
+        /* A literal like the device names', and not owned. */
+        s->name = CGColorSpaceNamedSRGBV2[i].name;
+        s->extended = CGColorSpaceNamedSRGBV2[i].extended;
+        s->profile = profile;
+        s->profileLen = len;
+        CGColorSpaceNamedSRGBV2State[i] = s;
         return s;
     }
     return NULL;
