@@ -25,8 +25,10 @@
      - CreateLinearized, CreateExtended and their Extended variants,
      - CreateICCBased, CreateWithICCData, CreateWithICCProfile,
        CreateWithColorSyncProfile, CreateWithURL, CreatePlatformProfile,
-     - CreateWithID, and CreateWithName for all but eighteen names, since
-       the rest resolve to embedded profiles.
+     - CreateWithID, and CreateWithName for all but eleven of the fifty name
+       constants: the thirty-nine it does accept are assembled here, five of
+       the eleven resolve on Apple to embedded profiles this step cannot
+       emit, and six Apple refuses as well.
 
    The three calibrated spaces do synthesise a profile, and the size varies
    with the shape of the request: 380 bytes for a calibrated gray, 416 to 528
@@ -99,14 +101,14 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
 
    The names that resolve here are of two kinds.  Five need no profile of
    their own -- the three device names, kCGColorSpaceColoredPattern and
-   kCGColorSpaceGenericLab -- and the thirty described below are assembled
-   from recovered constants.  Every other name yields NULL, because it resolves
-   to a space carrying an embedded profile this step cannot emit yet.  That set
-   is neither the identifier table nor a subset of it: of the 50 name constants
-   reachable through the API, 44 resolve and 6 return NULL, and eight of the
-   resolving names are absent from the table that CGColorSpaceIDFromName and
-   CGColorSpaceNameFromID use.  So this accepts names that have no identifier,
-   and refuses names that do.
+   kCGColorSpaceGenericLab -- and the thirty-four described below are
+   assembled from recovered constants.  Every other name yields NULL, because
+   either it resolves to a space carrying an embedded profile this step cannot
+   emit yet or Apple refuses it too.  That set is neither the identifier table
+   nor a subset of it: of the 50 name constants reachable through the API, 44
+   resolve and 6 return NULL, and eight of the resolving names are absent from
+   the table that CGColorSpaceIDFromName and CGColorSpaceNameFromID use.  So
+   this accepts names that have no identifier, and refuses names that do.
 
    The three device names answer the process-lifetime singletons, identical to
    what CGColorSpaceCreateDeviceGray, ...DeviceRGB and ...DeviceCMYK return.
@@ -146,7 +148,7 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
    kCGColorSpaceGenericRGB whose colorants it very nearly shares -- a shade
    more saturated, which is still short of what Apple calls wide.
 
-   kCGColorSpaceGenericRGB is the largest profile in the file, 1,992 bytes,
+   kCGColorSpaceGenericRGB is the largest of these RGB profiles, 1,992 bytes,
    and nearly all of the difference is one tag: 'dscm', a translation list
    covering thirty-one languages.  That tag is why this profile needs three
    things the rest do not.  It is declared before the colorants rather than
@@ -203,7 +205,7 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
    extended range and is nevertheless not wide gamut, so letting the flag stand
    on its own would call it one.
 
-   Three resolve to a profile of quite another shape:
+   Five resolve to a profile of quite another shape:
    kCGColorSpaceLinearGray and kCGColorSpaceExtendedLinearGray share a single
    356-byte v2.1 profile, which is a monochrome/TRC one rather than a
    colorimetric RGB: four tags instead of ten or eleven, a legacy 'desc' and
@@ -222,9 +224,23 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreatePattern(
    size.  It reports one component and no primaries and is not wide gamut, like
    the other gray profiles.
 
-   Every other name returns NULL for now; the remaining fifteen resolve to
-   embedded profiles, which the rest of this file's constructors do not yet
-   assemble. */
+   kCGColorSpaceGenericGrayGamma2_2 builds a third, and
+   kCGColorSpaceExtendedGray points at it as well: the same 4,508 bytes, the
+   extended flag the only thing that tells them apart, exactly as the pairs
+   above.  Its header is v2.0, older than either of its siblings, but it is
+   otherwise the generic gray profile's shape with a different name on the
+   description and a different copyright: the same white point, twenty-eight of
+   the same thirty-one translations in the same places with the last three
+   traded among Arabic, Russian and English, and a second 'dscm' of 2,074
+   bytes where that one is 1,622.  The difference that earns it a name of its
+   own is the tone curve, which is not a gamma at all but 1,024 sampled entries
+   -- sRGB's transfer function -- so this profile is 4,508 bytes where the
+   other two are 2,020 and 356.  It reports one component and no primaries and
+   is not wide gamut, like the rest.
+
+   Every other name returns NULL for now; eleven remain, of which five resolve
+   on Apple to embedded profiles the rest of this file's constructors do not
+   yet assemble and six Apple refuses as well. */
 CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateWithName(
     CFStringRef __nullable name);
 

@@ -221,9 +221,14 @@ static struct CGColorSpace *CGColorSpaceGenericLabState;
    name, which is how CGColorSpaceCreateWithName falls through. */
 static CGColorSpaceRef CGColorSpaceCreateNamedRGBV4(CFStringRef name);
 
-/* The same arrangement for the two gray names, which resolve to a single v2.1
-   profile of a rather different shape. */
+/* The same arrangement for the five gray names, which resolve to three
+   profiles of a rather different shape. */
 static CGColorSpaceRef CGColorSpaceCreateNamedGrayV2(CFStringRef name);
+
+/* Declared ahead of its first use by put_gray_v2, which writes one row's
+   sampled tone table with it; the definition sits with the HDR emitter and is
+   shared with that template. */
+static size_t put_curve_sampled(unsigned char *p, const uint16_t *v, size_t n);
 
 /* And for the ten HDR names, which resolve to six profiles of a third shape:
    the PQ and HLG variants of the Display P3, Rec. ITU-R BT.709 and Rec. ITU-R
@@ -429,7 +434,7 @@ CGColorSpaceRef CGColorSpaceCreatePattern(CGColorSpaceRef baseSpace)
 
    A NULL name and the empty string both return NULL rather than faulting.
 
-   Thirty-six of the fifty name constants resolve here, where Apple resolves
+   Thirty-nine of the fifty name constants resolve here, where Apple resolves
    forty-four.  The identifier table is not the set of names this accepts and is
    not even most of it: sweeping every constant reachable through the API gives
    50 distinct names, of which Apple's 44 resolve and six return NULL.  Of those
@@ -438,11 +443,11 @@ CGColorSpaceRef CGColorSpaceCreatePattern(CGColorSpaceRef baseSpace)
    through a sibling -- the 2020 PQ and HLG names, and the two EOTF names.  The
    six that return NULL are Pattern, Unnamed, Invalid, and the three legacy
    GenericGamma2_2 / GenericCMYKLinear spellings.  The eight with no identifier
-   are the three device names, the three generic profiles the table still omits,
-   and ColoredPattern -- so a lookup built from the identifier table alone would
-   refuse seven names Apple accepts, among them kCGColorSpaceGenericXYZ, which
+   are the three device names, the four generic profiles the table omits, and
+   ColoredPattern -- so a lookup built from the identifier table alone would
+   refuse eight names Apple accepts, among them kCGColorSpaceGenericGray, which
    reads as identifier 0 and so is indistinguishable from a name Apple has never
-   heard of.  The seven names this step still refuses are the ones carrying a
+   heard of.  The five names this step still refuses are the ones carrying a
    profile it cannot emit yet.
 
    The three device names resolve to the file-scope singletons, so the named
@@ -516,10 +521,11 @@ CGColorSpaceRef CGColorSpaceCreateWithName(CFStringRef name)
         CGColorSpaceRef gray = CGColorSpaceCreateNamedGrayV2(name);
         CGColorSpaceRef hdr;
 
-        /* Three more are gray rather than RGB, so they get their own template,
-           which holds two profiles: the linear v2.1 one carrying two names,
-           the second an alias of the first, and the generic v2.2 one.  Asked
-           first because it is the shortest list of the three. */
+        /* Five more are gray rather than RGB, so they get their own template,
+           which holds three profiles: the linear v2.1 one carrying two names,
+           the second an alias of the first, the generic v2.2 one with a name
+           to itself, and the gamma 2.2 one carrying the fifth name as an
+           alias.  Asked first because it is the shortest list of the three. */
         if (gray)
             return gray;
         /* Six more are HDR, in the PQ and HLG variants of the Display P3, 709
@@ -529,8 +535,9 @@ CGColorSpaceRef CGColorSpaceCreateWithName(CFStringRef name)
             return hdr;
     }
 
-    /* The names no template owns fall through to the same NULL the other seven
-       produce, of which five are names Apple refuses too. */
+    /* The names no template owns fall through to NULL: eleven of the fifty,
+       of which six are names Apple refuses too and the other five are the
+       profiles this step cannot emit yet. */
     return CGColorSpaceCreateNamedRGBV4(name);
 }
 
@@ -610,6 +617,7 @@ enum {
     CGICCVersionOffset = 8,
     /* The versions the profiles here declare: v2.1 and v2.2 for the three that
        predate the multi-localized string types, v4 for the rest. */
+    CGICCVersionV20 = 0x02000000,
     CGICCVersionV21 = 0x02100000,
     CGICCVersionV22 = 0x02200000,
     CGICCVersionV4 = 0x04000000,
@@ -2174,23 +2182,25 @@ static CGColorSpaceRef CGColorSpaceCreateNamedRGBV4(CFStringRef name)
     return NULL;
 }
 
-/* The v2 monochrome/TRC template, holding two profiles.
+/* The v2 monochrome/TRC template, holding three profiles.
 
-   Both gray spaces are gray profiles rather than RGB ones, and v2 rather than
-   v4, so they share almost nothing with the eleven above but the header: four
-   tags apiece rather than ten or eleven, the description and copyright as the
-   legacy 'desc' and 'text' types rather than 'mluc' records, no colorants at
-   all, and one tone curve rather than three.  What they share with each other
-   is the shape, the header illuminant, and the 461/256 gamma; what they share
-   with the RGB profiles is the white point, and only exactly -- the
-   quantisation step those mostly lose a unit to is not lost by these.
+   All three gray spaces are gray profiles rather than RGB ones, and v2 rather
+   than v4, so they share almost nothing with the eleven above but the header:
+   four or five tags rather than ten or eleven, the description and copyright
+   as the legacy 'desc' and 'text' types rather than 'mluc' records, no
+   colorants at all, and one tone curve rather than three.  What they share
+   with each other is the shape and the header illuminant; what they share with
+   the RGB profiles is the white point, and only exactly -- the quantisation
+   step those mostly lose a unit to is not lost by these.
 
    The tag order is description, constant tag, copyright, white point, tone
    curve, and it is the same as the v4 template's for as far as the two run:
    'desc', 'cprt', 'wtpt'.  The constant tag is there only when a row carries
    one, and 'dscm' goes straight after the description as it does on that
-   template.  The tone curve is the one-word identity every other tone curve
-   here is a special case of.
+   template.  The tone curve is a parameter -- the identity of LinearGray, the
+   461/256 gamma GenericRGB shares with GenericGray -- except where a row
+   supplies a sampled table of its own, which is how the gamma 2.2 profile
+   stores the 1,024 entries Apple quantised sRGB's transfer function to.
 
    The blocks are laid out the same way as on the v4 template, each aligned and
    the next beginning after it, so for LinearGray -- the one profile here with
@@ -2201,7 +2211,8 @@ static CGColorSpaceRef CGColorSpaceCreateNamedRGBV4(CFStringRef name)
    tone curve's fourteen bytes finishing at 354, and the profile is the 356
    bytes that pads that to a four-byte boundary.  GenericGray inserts its 1,622
    byte 'dscm' between the description and the copyright and so lands at 2,020
-   bytes. */
+   bytes, and the gamma 2.2 profile does the same with a 2,074 byte one and a
+   2,060 byte curve and lands at 4,508. */
 
 /* One gray space's parameters.  As with the RGB rows above, these are
    constants recovered from the profile the name resolves to rather than
@@ -2212,22 +2223,27 @@ struct cgs_gray_v2 {
     int created[6];
     int32_t wtpt[3];
     struct cgs_icc_curve trc;
-    /* The profile version, as the four-byte header field.  The linear gray
-       profile is v2.1, the generic one v2.2, and both predate the 'mluc'
-       string types, which is why they carry legacy strings here as well. */
+    /* The tone curve as a sampled table instead, for the one row here whose
+       profile stores 1,024 entries rather than a parameter.  When this is null
+       'trc' is written as it is elsewhere; when it is not, 'trc' is ignored. */
+    const uint16_t *trcTable;
+    int trcCount;
+    /* The profile version, as the four-byte header field.  All three predate
+       the 'mluc' string types, which is why they carry legacy strings here as
+       well; the linear gray profile is v2.1, the generic one v2.2, and the
+       gamma one v2.0. */
     int32_t version;
-    /* The manufacturer, spelled the way this row writes it; the two gray
-       profiles differ, one naming itself and one writing 'none'. */
+    /* The manufacturer, spelled the way this row writes it; the three differ,
+       two writing 'none' and one naming itself. */
     const char *manufacturer;
     /* Whether the 'desc' carries a ScriptCode copy of its ASCII; see
-       put_desc.  The generic gray profile does and the linear one does not. */
+       put_desc.  Only the generic gray profile does. */
     int descScriptCode;
     /* Whether the description carries the terminator byte that follows its
-       ScriptCode field.  The linear profile does and the generic one does
-       not, which is the one byte of difference between their otherwise
-       identical 12-byte, gap, count, text and 67-byte-field arrangements. */
+       67-byte field.  The linear and gamma profiles do and the generic one
+       does not; nothing in the format requires either, so the row says. */
     int descTrailer;
-    /* A constant tag, which for these two means only the 'dscm' translation
+    /* A constant tag, which for these rows means only the 'dscm' translation
        list, and where in the table it belongs. */
     const unsigned char *extraData[CGICCRGBV4MaxExtraTags];
     const char *extraName[CGICCRGBV4MaxExtraTags];
@@ -2269,20 +2285,26 @@ static unsigned char *put_gray_v2(const struct cgs_gray_v2 *v, size_t *outLen)
        lengths are worked out here rather than written down.
 
        The description ends with the ScriptCode field and then a terminator, and
-       the two profiles on this template disagree about whether that last byte
-       is there: the linear one carries it and the generic one does not, which
-       is why the field is a row's to say rather than a constant.  Nothing about
-       the format requires either.  The RGB template does not need the choice,
-       since the three profiles on it that carry legacy strings all have it. */
+       the three profiles on this template disagree about whether that last byte
+       is there: two carry it and one does not, which is why the field is a
+       row's to say rather than a constant.  Nothing about the format requires
+       either.  The RGB template does not need the choice, since the three
+       profiles on it that carry legacy strings all have it. */
     dlen = 12 + (strlen(v->desc) + 1) + 4 + 4 + 2
         + (v->descScriptCode ? 1 : 0) + 67 + v->descTrailer;
-    tlen = v->trc.parametric ? 12 + 4 * (size_t)v->trc.words : 14;
+    /* A sampled curve is a signature, four reserved bytes, a count and two
+       bytes per entry; a parameter is the fourteen bytes put_icc_curve writes
+       or, for a 'para', the twelve plus four per word that it writes. */
+    if (v->trcTable)
+        tlen = 12 + 2 * (size_t)v->trcCount;
+    else
+        tlen = v->trc.parametric ? 12 + 4 * (size_t)v->trc.words : 14;
 
     /* The tag table lists the description, then this row's constant tags if it
        has any, then the rest.  After the description is the one placement the
-       gray template sees -- both gray profiles with an extra put 'dscm' there
-       -- and the RGB template's own enum is reused for it rather than
-       duplicated, since the two mean the same thing. */
+       gray template sees -- the two rows with an extra put 'dscm' there -- and
+       the RGB template's own enum is reused for it rather than duplicated,
+       since the two mean the same thing. */
     n = 0;
     name[n++] = fixed[0];
     if (v->extrasWhere == CGICCRGBV4ExtrasAfterDesc) {
@@ -2350,6 +2372,8 @@ static unsigned char *put_gray_v2(const struct cgs_gray_v2 *v, size_t *outLen)
             put_text(e, v->cprt);
         else if (name[i] == fixed[2])
             put_xyz_i32(e, v->wtpt);
+        else if (v->trcTable)
+            put_curve_sampled(e, v->trcTable, (size_t)v->trcCount);
         else
             put_icc_curve(e, &v->trc);
     }
@@ -2445,15 +2469,181 @@ static const struct cgs_gray_v2 GenericGray = {
     .extrasWhere = CGICCRGBV4ExtrasAfterDesc,
 };
 
-/* The three names, and the extended flag each carries.
+/* kCGColorSpaceGenericGrayGamma2_2's tone curve, all 1,024 of its entries.
+
+   The profile carries them as a 'curv' of count 1024 rather than as a
+   parameter, and they are sRGB's transfer function quantised over 1/1023 --
+   the closed form matches every one of them, but calling pow() while the
+   profile is assembled would make Apple's bytes depend on whichever libm the
+   machine has, so they are written down as the profile itself wrote them,
+   for the same reason the sampled HDR tables further down are. */
+static const uint16_t cgsGrayGamma22Tone[1024] = {
+    0x0000, 0x0005, 0x000a, 0x000f, 0x0014, 0x0019, 0x001e, 0x0023, 0x0028, 0x002d, 0x0032, 0x0037,
+    0x003b, 0x0040, 0x0045, 0x004a, 0x004f, 0x0054, 0x0059, 0x005e, 0x0063, 0x0068, 0x006d, 0x0072,
+    0x0077, 0x007c, 0x0081, 0x0086, 0x008b, 0x0090, 0x0095, 0x009a, 0x009f, 0x00a4, 0x00a9, 0x00ae,
+    0x00b2, 0x00b7, 0x00bc, 0x00c1, 0x00c6, 0x00cb, 0x00d0, 0x00d5, 0x00db, 0x00e0, 0x00e5, 0x00eb,
+    0x00f0, 0x00f6, 0x00fb, 0x0101, 0x0107, 0x010d, 0x0113, 0x0119, 0x011f, 0x0125, 0x012b, 0x0132,
+    0x0138, 0x013e, 0x0145, 0x014c, 0x0152, 0x0159, 0x0160, 0x0167, 0x016e, 0x0175, 0x017c, 0x0183,
+    0x018b, 0x0192, 0x019a, 0x01a1, 0x01a9, 0x01b1, 0x01b9, 0x01c1, 0x01c9, 0x01d1, 0x01d9, 0x01e1,
+    0x01e9, 0x01f2, 0x01fa, 0x0203, 0x020c, 0x0214, 0x021d, 0x0226, 0x022f, 0x0238, 0x0241, 0x024b,
+    0x0254, 0x025d, 0x0267, 0x0271, 0x027a, 0x0284, 0x028e, 0x0298, 0x02a2, 0x02ac, 0x02b6, 0x02c1,
+    0x02cb, 0x02d5, 0x02e0, 0x02eb, 0x02f5, 0x0300, 0x030b, 0x0316, 0x0321, 0x032d, 0x0338, 0x0343,
+    0x034f, 0x035a, 0x0366, 0x0372, 0x037e, 0x038a, 0x0396, 0x03a2, 0x03ae, 0x03ba, 0x03c7, 0x03d3,
+    0x03e0, 0x03ec, 0x03f9, 0x0406, 0x0413, 0x0420, 0x042d, 0x043b, 0x0448, 0x0455, 0x0463, 0x0471,
+    0x047e, 0x048c, 0x049a, 0x04a8, 0x04b6, 0x04c4, 0x04d3, 0x04e1, 0x04f0, 0x04fe, 0x050d, 0x051c,
+    0x052b, 0x053a, 0x0549, 0x0558, 0x0567, 0x0577, 0x0586, 0x0596, 0x05a6, 0x05b5, 0x05c5, 0x05d5,
+    0x05e5, 0x05f6, 0x0606, 0x0616, 0x0627, 0x0637, 0x0648, 0x0659, 0x066a, 0x067b, 0x068c, 0x069d,
+    0x06af, 0x06c0, 0x06d1, 0x06e3, 0x06f5, 0x0707, 0x0719, 0x072b, 0x073d, 0x074f, 0x0761, 0x0774,
+    0x0786, 0x0799, 0x07ac, 0x07bf, 0x07d2, 0x07e5, 0x07f8, 0x080b, 0x081f, 0x0832, 0x0846, 0x085a,
+    0x086e, 0x0882, 0x0896, 0x08aa, 0x08be, 0x08d2, 0x08e7, 0x08fb, 0x0910, 0x0925, 0x093a, 0x094f,
+    0x0964, 0x0979, 0x098f, 0x09a4, 0x09ba, 0x09cf, 0x09e5, 0x09fb, 0x0a11, 0x0a27, 0x0a3d, 0x0a54,
+    0x0a6a, 0x0a81, 0x0a98, 0x0aae, 0x0ac5, 0x0adc, 0x0af3, 0x0b0b, 0x0b22, 0x0b39, 0x0b51, 0x0b69,
+    0x0b80, 0x0b98, 0x0bb0, 0x0bc8, 0x0be1, 0x0bf9, 0x0c12, 0x0c2a, 0x0c43, 0x0c5c, 0x0c75, 0x0c8e,
+    0x0ca7, 0x0cc0, 0x0cd9, 0x0cf3, 0x0d0d, 0x0d26, 0x0d40, 0x0d5a, 0x0d74, 0x0d8e, 0x0da9, 0x0dc3,
+    0x0dde, 0x0df8, 0x0e13, 0x0e2e, 0x0e49, 0x0e64, 0x0e7f, 0x0e9b, 0x0eb6, 0x0ed2, 0x0eee, 0x0f09,
+    0x0f25, 0x0f41, 0x0f5e, 0x0f7a, 0x0f96, 0x0fb3, 0x0fcf, 0x0fec, 0x1009, 0x1026, 0x1043, 0x1061,
+    0x107e, 0x109b, 0x10b9, 0x10d7, 0x10f5, 0x1113, 0x1131, 0x114f, 0x116d, 0x118c, 0x11aa, 0x11c9,
+    0x11e8, 0x1207, 0x1226, 0x1245, 0x1264, 0x1284, 0x12a3, 0x12c3, 0x12e3, 0x1303, 0x1323, 0x1343,
+    0x1363, 0x1383, 0x13a4, 0x13c5, 0x13e5, 0x1406, 0x1427, 0x1449, 0x146a, 0x148b, 0x14ad, 0x14ce,
+    0x14f0, 0x1512, 0x1534, 0x1556, 0x1578, 0x159b, 0x15bd, 0x15e0, 0x1603, 0x1626, 0x1649, 0x166c,
+    0x168f, 0x16b2, 0x16d6, 0x16fa, 0x171d, 0x1741, 0x1765, 0x1789, 0x17ae, 0x17d2, 0x17f7, 0x181b,
+    0x1840, 0x1865, 0x188a, 0x18af, 0x18d5, 0x18fa, 0x1920, 0x1945, 0x196b, 0x1991, 0x19b7, 0x19dd,
+    0x1a04, 0x1a2a, 0x1a51, 0x1a77, 0x1a9e, 0x1ac5, 0x1aec, 0x1b14, 0x1b3b, 0x1b63, 0x1b8a, 0x1bb2,
+    0x1bda, 0x1c02, 0x1c2a, 0x1c52, 0x1c7b, 0x1ca3, 0x1ccc, 0x1cf5, 0x1d1e, 0x1d47, 0x1d70, 0x1d99,
+    0x1dc3, 0x1dec, 0x1e16, 0x1e40, 0x1e6a, 0x1e94, 0x1ebe, 0x1ee9, 0x1f13, 0x1f3e, 0x1f69, 0x1f94,
+    0x1fbf, 0x1fea, 0x2015, 0x2041, 0x206c, 0x2098, 0x20c4, 0x20f0, 0x211c, 0x2148, 0x2175, 0x21a1,
+    0x21ce, 0x21fb, 0x2227, 0x2255, 0x2282, 0x22af, 0x22dd, 0x230a, 0x2338, 0x2366, 0x2394, 0x23c2,
+    0x23f0, 0x241f, 0x244d, 0x247c, 0x24ab, 0x24da, 0x2509, 0x2538, 0x2568, 0x2597, 0x25c7, 0x25f7,
+    0x2627, 0x2657, 0x2687, 0x26b7, 0x26e8, 0x2718, 0x2749, 0x277a, 0x27ab, 0x27dc, 0x280d, 0x283f,
+    0x2871, 0x28a2, 0x28d4, 0x2906, 0x2938, 0x296b, 0x299d, 0x29d0, 0x2a02, 0x2a35, 0x2a68, 0x2a9b,
+    0x2acf, 0x2b02, 0x2b36, 0x2b69, 0x2b9d, 0x2bd1, 0x2c05, 0x2c39, 0x2c6e, 0x2ca2, 0x2cd7, 0x2d0c,
+    0x2d41, 0x2d76, 0x2dab, 0x2de1, 0x2e16, 0x2e4c, 0x2e82, 0x2eb7, 0x2eee, 0x2f24, 0x2f5a, 0x2f91,
+    0x2fc7, 0x2ffe, 0x3035, 0x306c, 0x30a4, 0x30db, 0x3112, 0x314a, 0x3182, 0x31ba, 0x31f2, 0x322a,
+    0x3263, 0x329b, 0x32d4, 0x330d, 0x3346, 0x337f, 0x33b8, 0x33f1, 0x342b, 0x3465, 0x349e, 0x34d8,
+    0x3513, 0x354d, 0x3587, 0x35c2, 0x35fd, 0x3637, 0x3672, 0x36ae, 0x36e9, 0x3724, 0x3760, 0x379c,
+    0x37d7, 0x3814, 0x3850, 0x388c, 0x38c8, 0x3905, 0x3942, 0x397f, 0x39bc, 0x39f9, 0x3a36, 0x3a74,
+    0x3ab2, 0x3aef, 0x3b2d, 0x3b6b, 0x3baa, 0x3be8, 0x3c27, 0x3c65, 0x3ca4, 0x3ce3, 0x3d22, 0x3d61,
+    0x3da1, 0x3de0, 0x3e20, 0x3e60, 0x3ea0, 0x3ee0, 0x3f21, 0x3f61, 0x3fa2, 0x3fe2, 0x4023, 0x4064,
+    0x40a6, 0x40e7, 0x4129, 0x416a, 0x41ac, 0x41ee, 0x4230, 0x4272, 0x42b5, 0x42f7, 0x433a, 0x437d,
+    0x43c0, 0x4403, 0x4447, 0x448a, 0x44ce, 0x4512, 0x4555, 0x459a, 0x45de, 0x4622, 0x4667, 0x46ab,
+    0x46f0, 0x4735, 0x477b, 0x47c0, 0x4805, 0x484b, 0x4891, 0x48d7, 0x491d, 0x4963, 0x49a9, 0x49f0,
+    0x4a37, 0x4a7d, 0x4ac4, 0x4b0c, 0x4b53, 0x4b9a, 0x4be2, 0x4c2a, 0x4c72, 0x4cba, 0x4d02, 0x4d4a,
+    0x4d93, 0x4ddc, 0x4e25, 0x4e6e, 0x4eb7, 0x4f00, 0x4f49, 0x4f93, 0x4fdd, 0x5027, 0x5071, 0x50bb,
+    0x5106, 0x5150, 0x519b, 0x51e6, 0x5231, 0x527c, 0x52c7, 0x5313, 0x535f, 0x53aa, 0x53f6, 0x5442,
+    0x548f, 0x54db, 0x5528, 0x5575, 0x55c2, 0x560f, 0x565c, 0x56a9, 0x56f7, 0x5744, 0x5792, 0x57e0,
+    0x582f, 0x587d, 0x58cb, 0x591a, 0x5969, 0x59b8, 0x5a07, 0x5a56, 0x5aa6, 0x5af5, 0x5b45, 0x5b95,
+    0x5be5, 0x5c35, 0x5c86, 0x5cd6, 0x5d27, 0x5d78, 0x5dc9, 0x5e1a, 0x5e6c, 0x5ebd, 0x5f0f, 0x5f61,
+    0x5fb3, 0x6005, 0x6057, 0x60aa, 0x60fc, 0x614f, 0x61a2, 0x61f5, 0x6249, 0x629c, 0x62f0, 0x6343,
+    0x6397, 0x63eb, 0x6440, 0x6494, 0x64e9, 0x653d, 0x6592, 0x65e7, 0x663d, 0x6692, 0x66e8, 0x673d,
+    0x6793, 0x67e9, 0x683f, 0x6896, 0x68ec, 0x6943, 0x699a, 0x69f1, 0x6a48, 0x6a9f, 0x6af7, 0x6b4f,
+    0x6ba7, 0x6bff, 0x6c57, 0x6caf, 0x6d08, 0x6d60, 0x6db9, 0x6e12, 0x6e6b, 0x6ec4, 0x6f1e, 0x6f78,
+    0x6fd1, 0x702b, 0x7086, 0x70e0, 0x713a, 0x7195, 0x71f0, 0x724b, 0x72a6, 0x7301, 0x735d, 0x73b8,
+    0x7414, 0x7470, 0x74cc, 0x7528, 0x7585, 0x75e1, 0x763e, 0x769b, 0x76f8, 0x7756, 0x77b3, 0x7811,
+    0x786e, 0x78cc, 0x792a, 0x7989, 0x79e7, 0x7a46, 0x7aa5, 0x7b04, 0x7b63, 0x7bc2, 0x7c21, 0x7c81,
+    0x7ce1, 0x7d41, 0x7da1, 0x7e01, 0x7e62, 0x7ec2, 0x7f23, 0x7f84, 0x7fe5, 0x8047, 0x80a8, 0x810a,
+    0x816b, 0x81cd, 0x8230, 0x8292, 0x82f4, 0x8357, 0x83ba, 0x841d, 0x8480, 0x84e3, 0x8547, 0x85ab,
+    0x860e, 0x8672, 0x86d7, 0x873b, 0x879f, 0x8804, 0x8869, 0x88ce, 0x8933, 0x8999, 0x89fe, 0x8a64,
+    0x8aca, 0x8b30, 0x8b96, 0x8bfc, 0x8c63, 0x8cca, 0x8d31, 0x8d98, 0x8dff, 0x8e66, 0x8ece, 0x8f36,
+    0x8f9e, 0x9006, 0x906e, 0x90d6, 0x913f, 0x91a8, 0x9211, 0x927a, 0x92e3, 0x934d, 0x93b6, 0x9420,
+    0x948a, 0x94f4, 0x955f, 0x95c9, 0x9634, 0x969f, 0x970a, 0x9775, 0x97e0, 0x984c, 0x98b8, 0x9924,
+    0x9990, 0x99fc, 0x9a68, 0x9ad5, 0x9b42, 0x9baf, 0x9c1c, 0x9c89, 0x9cf7, 0x9d64, 0x9dd2, 0x9e40,
+    0x9eae, 0x9f1d, 0x9f8b, 0x9ffa, 0xa069, 0xa0d8, 0xa147, 0xa1b6, 0xa226, 0xa296, 0xa306, 0xa376,
+    0xa3e6, 0xa456, 0xa4c7, 0xa538, 0xa5a9, 0xa61a, 0xa68b, 0xa6fd, 0xa76e, 0xa7e0, 0xa852, 0xa8c4,
+    0xa937, 0xa9a9, 0xaa1c, 0xaa8f, 0xab02, 0xab75, 0xabe9, 0xac5c, 0xacd0, 0xad44, 0xadb8, 0xae2d,
+    0xaea1, 0xaf16, 0xaf8b, 0xb000, 0xb075, 0xb0ea, 0xb160, 0xb1d6, 0xb24b, 0xb2c2, 0xb338, 0xb3ae,
+    0xb425, 0xb49c, 0xb513, 0xb58a, 0xb601, 0xb679, 0xb6f0, 0xb768, 0xb7e0, 0xb859, 0xb8d1, 0xb94a,
+    0xb9c2, 0xba3b, 0xbab5, 0xbb2e, 0xbba7, 0xbc21, 0xbc9b, 0xbd15, 0xbd8f, 0xbe0a, 0xbe84, 0xbeff,
+    0xbf7a, 0xbff5, 0xc070, 0xc0ec, 0xc167, 0xc1e3, 0xc25f, 0xc2db, 0xc358, 0xc3d4, 0xc451, 0xc4ce,
+    0xc54b, 0xc5c8, 0xc646, 0xc6c3, 0xc741, 0xc7bf, 0xc83d, 0xc8bc, 0xc93a, 0xc9b9, 0xca38, 0xcab7,
+    0xcb36, 0xcbb6, 0xcc35, 0xccb5, 0xcd35, 0xcdb5, 0xce36, 0xceb6, 0xcf37, 0xcfb8, 0xd039, 0xd0ba,
+    0xd13c, 0xd1be, 0xd23f, 0xd2c1, 0xd344, 0xd3c6, 0xd449, 0xd4cb, 0xd54e, 0xd5d1, 0xd655, 0xd6d8,
+    0xd75c, 0xd7e0, 0xd864, 0xd8e8, 0xd96c, 0xd9f1, 0xda76, 0xdafb, 0xdb80, 0xdc05, 0xdc8a, 0xdd10,
+    0xdd96, 0xde1c, 0xdea2, 0xdf29, 0xdfaf, 0xe036, 0xe0bd, 0xe144, 0xe1cc, 0xe253, 0xe2db, 0xe363,
+    0xe3eb, 0xe473, 0xe4fc, 0xe584, 0xe60d, 0xe696, 0xe71f, 0xe7a9, 0xe832, 0xe8bc, 0xe946, 0xe9d0,
+    0xea5b, 0xeae5, 0xeb70, 0xebfb, 0xec86, 0xed11, 0xed9c, 0xee28, 0xeeb4, 0xef40, 0xefcc, 0xf058,
+    0xf0e5, 0xf172, 0xf1ff, 0xf28c, 0xf319, 0xf3a7, 0xf434, 0xf4c2, 0xf550, 0xf5de, 0xf66d, 0xf6fb,
+    0xf78a, 0xf819, 0xf8a8, 0xf938, 0xf9c7, 0xfa57, 0xfae7, 0xfb77, 0xfc07, 0xfc98, 0xfd29, 0xfdba,
+    0xfe4b, 0xfedc, 0xff6d, 0xffff,
+};
+
+/* The thirty-one translations the gamma 2.2 profile's 'dscm' carries, in the
+   order it lists them.  The same languages and the same Slovak-first order as
+   GenericGray's above, but that one closes with Russian, English and Arabic
+   in that order and this one puts Arabic two places before English, and every
+   string is of the gamma profile rather than the plain one. */
+static const struct cgs_mluc_record GenericGrayGamma22Dscm[31] = {
+    { "skSK", "Všeobecná sivá gama 2,2" },
+    { "daDK", "Generisk grå 2,2 gamma-profil" },
+    { "caES", "Gamma de grisos genèrica 2.2" },
+    { "viVN", "Cấu hình Màu xám Chung Gamma 2.2" },
+    { "ptBR", "Perfil Genérico da Gama de Cinzas 2,2" },
+    { "ukUA", "Загальна Gray-гама 2.2" },
+    { "frFU", "Profil générique gris gamma 2,2" },
+    { "huHU", "Általános szürke gamma 2.2" },
+    { "zhTW", "通用灰階光度2.2色彩描述" },
+    { "koKR", "일반 회색 감마 2.2 프로파일" },
+    { "nbNO", "Generisk grå gamma 2,2-profil" },
+    { "csCZ", "Obecná šedá gama 2.2" },
+    { "heIL", "גאמה אפור כללי 2.2" },
+    { "roRO", "Gama gri generică 2,2" },
+    { "deDE", "Allgemeines Graustufen-Profil Gamma 2,2" },
+    { "itIT", "Profilo grigio generico della gamma 2,2" },
+    { "svSE", "Generisk grå 2,2 gammaprofil" },
+    { "zhCN", "普通灰度系数2.2描述文件" },
+    { "jaJP", "一般グレイガンマ 2.2 プロファイル" },
+    { "elGR", "Γενικό Γκρι Γάμμα 2.2" },
+    { "ptPO", "Perfil genérico de cinzentos da Gamma 2,2" },
+    { "nlNL", "Algemeen grijs gamma 2,2-profiel" },
+    { "esES", "Perfil genérico de gamma de grises 2,2" },
+    { "thTH", "รังสีแกมมาเกรย์ทั่วไป 2.2" },
+    { "trTR", "Genel Gri Gama 2,2" },
+    { "fiFI", "Yleinen harmaan gamma 2,2 -profiili" },
+    { "hrHR", "Generički Gray Gamma 2.2 profil" },
+    { "plPL", "Uniwersalny profil szarości gamma 2,2" },
+    { "arEG", "غاما 2.2 لون رمادي عام" },
+    { "ruRU", "Общая серая гамма 2,2-профиль" },
+    { "enUS", "Generic Gray Gamma 2.2 Profile" },
+};
+
+/* kCGColorSpaceGenericGrayGamma2_2's profile, the third on this template, and
+   the one kCGColorSpaceExtendedGray points at as well -- the two are the same
+   bytes and differ only in the flag CGColorSpaceCreateWithName sets, the way
+   the extended RGB names do.  Recovered from the space the first name resolves
+   to and checked byte for byte by rebuilding it.
+
+   It writes 'none' where the linear one names Apple, and its description is
+   the plain ASCII with neither a ScriptCode copy nor a gap for one -- yet it
+   is the one that keeps the trailing terminator byte the generic gray profile
+   leaves out.  Its white point is the generic gray profile's, unit for unit.
+   What makes it its own profile is the tone curve: not the u8Fixed8 gamma of
+   its siblings but the 1,024 entries above. */
+static const struct cgs_gray_v2 GenericGrayGamma22 = {
+    .desc = "Generic Gray Gamma 2.2 Profile",
+    .version = CGICCVersionV20,
+    .manufacturer = "none",
+    .descTrailer = 1,
+    .created = { 2012, 8, 23, 15, 46, 15 },
+    .cprt = "Copyright Apple Inc., 2012",
+    .wtpt = { 0xf351, 0x10000, 0x116cc },
+    .trcTable = cgsGrayGamma22Tone,
+    .trcCount = 1024,
+    .extraName = { "dscm" },
+    .extraRecords = { GenericGrayGamma22Dscm },
+    .extraRecordCount = { 31 },
+    .extraCount = 1,
+    .extrasWhere = CGICCRGBV4ExtrasAfterDesc,
+};
+
+/* The five names, and the extended flag each carries.
 
    kCGColorSpaceExtendedLinearGray takes the very same 356 bytes as the space
-   it is named after: the profile records no range, so the profile cannot be
-   what tells the two apart.  They are reported unequal and are the same space
-   once the range is ignored, which is the same arrangement the extended RGB
-   names use.  kCGColorSpaceGenericGray has no extended counterpart here, and
-   builds its own profile. */
-enum { CGColorSpaceNamedGrayV2Count = 3 };
+   it is named after, and kCGColorSpaceExtendedGray the very same 4,508 as
+   kCGColorSpaceGenericGrayGamma2_2: neither profile records a range, so the
+   profile cannot be what tells the pair apart.  Each pair is reported unequal
+   and is the same space once the range is ignored, which is the same
+   arrangement the extended RGB names use.  kCGColorSpaceGenericGray has no
+   extended counterpart, and builds its own profile. */
+enum { CGColorSpaceNamedGrayV2Count = 5 };
 
 static const struct {
     const char *name;
@@ -2462,12 +2652,14 @@ static const struct {
 } CGColorSpaceNamedGrayV2[CGColorSpaceNamedGrayV2Count] = {
     { "kCGColorSpaceLinearGray", &LinearGray, false },
     { "kCGColorSpaceExtendedLinearGray", &LinearGray, true },
-    { "kCGColorSpaceGenericGray", &GenericGray, false }
+    { "kCGColorSpaceGenericGray", &GenericGray, false },
+    { "kCGColorSpaceGenericGrayGamma2_2", &GenericGrayGamma22, false },
+    { "kCGColorSpaceExtendedGray", &GenericGrayGamma22, true }
 };
 
 static struct CGColorSpace *CGColorSpaceNamedGrayV2State[CGColorSpaceNamedGrayV2Count];
 
-/* Build, or find, the space one of the two gray names resolves to.  Answers
+/* Build, or find, the space one of the five gray names resolves to.  Answers
    NULL for every other name, so the caller can fall through to the RGB
    template the same way it falls through from there. */
 static CGColorSpaceRef CGColorSpaceCreateNamedGrayV2(CFStringRef name)

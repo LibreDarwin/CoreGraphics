@@ -2766,13 +2766,14 @@ int main(void)
         }
 
         /* CreateWithName.  Only names whose answers agree are recorded here.
-           Apple resolves 40 of the 45 name constants and this step resolves
-           thirty-one, so the other nine would be a mismatch rather than a test
-           and each one joins this family as its profile template lands.  What
-           is recorded is the part that is not obvious from the name: that the
-           device names answer the existing singletons, that a pattern name
-           builds something fresh every call, and that the generic Lab name
-           resolves to precisely the profile CreateLab already emits. */
+           Apple resolves 44 of the fifty name constants and this step
+           resolves thirty-nine, so the other five would be a mismatch rather
+           than a test and each one joins this family as its profile template
+           lands.  What is recorded is the part that is not obvious from the
+           name: that the device names answer the existing singletons, that a
+           pattern name builds something fresh every call, and that the generic
+           Lab name resolves to precisely the profile CreateLab already
+           emits. */
         {
             /* The names that resolve in both. */
             static const char *const resolves[] = {
@@ -2781,16 +2782,21 @@ int main(void)
                 "kCGColorSpaceDeviceCMYK",
                 "kCGColorSpaceColoredPattern",
                 "kCGColorSpaceGenericLab",
-                /* The two profiles this template builds, carrying three names:
-                   the linear one is a gray space and so reports one component
-                   and no primaries, its extended name takes the same 356 bytes
-                   as its base, and the generic one is the 2,020-byte v2.2
-                   profile with the same one-component, no-primaries answer. */
+                /* The three profiles this template builds, carrying five
+                   names: the linear one is a gray space and so reports one
+                   component and no primaries, its extended name takes the same
+                   356 bytes as its base, and the generic one is the 2,020-byte
+                   v2.2 profile with the same one-component, no-primaries
+                   answer.  The gamma one is the third profile, 4,508 bytes of
+                   which the extended name takes the same copy, and both report
+                   the same answers again. */
                 "kCGColorSpaceLinearGray",
                 "kCGColorSpaceExtendedLinearGray",
                 "kCGColorSpaceGenericGray",
-                /* Twelve of the template's thirteen profiles, which between
-                   them carry seventeen names: the three extended-range aliases
+                "kCGColorSpaceGenericGrayGamma2_2",
+                "kCGColorSpaceExtendedGray",
+                /* Twelve of the template's fourteen profiles, which between
+                   them carry seventeen names: the five extended-range aliases
                    take the same profile bytes as their base and differ only in
                    the name and the extended flag. */
                 "kCGColorSpaceDisplayP3",
@@ -2872,7 +2878,7 @@ int main(void)
                    name, the identifier is 0, and the lookup still refuses it.
                    That makes it the one name a lookup built off the
                    identifier table gets wrong for a different reason than the
-                   other six -- it looks like a known id rather than an
+                   other five -- it looks like a known id rather than an
                    unknown one. */
                 "kCGColorSpacePattern",
                 "kCGColorSpaceUnnamed",
@@ -2881,7 +2887,7 @@ int main(void)
                 "kCGColorSpaceGenericRGBGamma2_2",
                 "kCGColorSpaceGenericCMYKLinear",
             };
-            /* Near misses around the five that work, since an exact byte
+            /* Near misses around names that do work, since an exact byte
                match has to fail all of these: wrong case, a space on either
                side, an extra character at either end, the bare human-readable
                name, and the empty and blank strings. */
@@ -2929,14 +2935,23 @@ int main(void)
                 { kCGColorSpaceModelMonochrome, 1, 6, 1, 0, 0 }, /* LinearGray */
                 { kCGColorSpaceModelMonochrome, 1, 6, 1, 1, 0 }, /* Extended LinearGray */
                 /* The generic gray space is the other profile on the gray
-                   template and the second-largest in the set, its 'dscm'
-                   translation list accounting for most of its 2,020 bytes.  It
-                   reports the same one-component, no-primaries answer as the
-                   linear one, is not extended, and its header being v2.2 makes
-                   no difference to what is reported -- the type is six, ICC,
-                   exactly as CoreMedia709 reports the same type as the v4 RGB
-                   profiles around it despite its own v2.1 header. */
+                   template, its 'dscm' translation list accounting for most of
+                   its 2,020 bytes.  It reports the same one-component,
+                   no-primaries answer as the linear one, is not extended, and
+                   its header being v2.2 makes no difference to what is
+                   reported -- the type is six, ICC, exactly as CoreMedia709
+                   reports the same type as the v4 RGB profiles around it
+                   despite its own v2.1 header. */
                 { kCGColorSpaceModelMonochrome, 1, 6, 1, 0, 0 }, /* GenericGray */
+                /* The third and last gray profile, and the largest of the
+                   three at 4,508 bytes: what puts it above the 2,020 the
+                   generic one runs to is its 1,024-entry sampled curve.  Its
+                   v2.0 header and its older creation date are not visible in
+                   what is reported, and neither is the curve -- the answers
+                   are the gray ones again, one component, no primaries, ICC,
+                   and neither wide nor extended until the extended name asks. */
+                { kCGColorSpaceModelMonochrome, 1, 6, 1, 0, 0 }, /* GenericGrayGamma2_2 */
+                { kCGColorSpaceModelMonochrome, 1, 6, 1, 1, 0 }, /* Extended Gray */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* DisplayP3 */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 1, 1 },        /* Extended DisplayP3 */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 0 },        /* ITUR_709 */
