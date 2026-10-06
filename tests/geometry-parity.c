@@ -2767,7 +2767,7 @@ int main(void)
 
         /* CreateWithName.  Only names whose answers agree are recorded here.
            Apple resolves 44 of the fifty name constants and this step
-           resolves forty, so the other four would be a mismatch rather
+           resolves forty-one, so the other three would be a mismatch rather
            than a test and each one joins this family as its profile template
            lands.  What is recorded is the part that is not obvious from the
            name: that the device names answer the existing singletons, that a
@@ -2801,6 +2801,13 @@ int main(void)
                    around it.  It is the one resolving name Apple marks
                    extended that the spelling does not hint at. */
                 "kCGColorSpaceGenericXYZ",
+                /* One more profile of a shape of its own: a 55,280-byte
+                   'prtr'-class v2.2 profile whose components are CMYK ink over
+                   a Lab PCS, the largest of the emitted profiles by far and
+                   the only one whose white point is a paper white rather than
+                   D50.  Nothing about the name is overridden the way the XYZ
+                   one is, so it reports a plain four-component space. */
+                "kCGColorSpaceGenericCMYK",
                 /* Twelve of the template's fourteen profiles, which between
                    them carry seventeen names: the five extended-range aliases
                    take the same profile bytes as their base and differ only in
@@ -2966,6 +2973,13 @@ int main(void)
                    and it cannot be wide gamut because an XYZ space has no
                    primaries for the measure to read. */
                 { kCGColorSpaceModelXYZ, 3, 6, 1, 1, 0 },        /* GenericXYZ */
+                /* CMYK is the other profile of a model of its own here, the
+                   DeviceCMYK space's four-ink model two spaces away, and the
+                   B2A tag on its profile is what makes it an output space like
+                   the neighboring RGB ones.  Apple marks it neither extended
+                   nor wide, so the row is the plainest four-component one: no
+                   overrides at all. */
+                { kCGColorSpaceModelCMYK, 4, 6, 1, 0, 0 },       /* GenericCMYK */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 1 },        /* DisplayP3 */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 1, 1 },        /* Extended DisplayP3 */
                 { kCGColorSpaceModelRGB, 3, 6, 1, 0, 0 },        /* ITUR_709 */
