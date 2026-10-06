@@ -602,14 +602,15 @@ static void dump_name(const char *name)
    verified; the lab_d50 and cal_rgb cases sit just outside those gates on
    purpose.
 
-   Conspicuously absent: a linearized space derived from a *named* profile,
-   such as CGColorSpaceCreateLinearized of kCGColorSpaceSRGB.  Apple rebuilds
-   those as tag-preserving canonical profiles (the sRGB one is the same 572
-   bytes as kCGColorSpaceLinearSRGB, with a legacy 'desc' record and a chad
-   and cicp tag), while our builder only accepts the mluc description of a
-   calibrated base and hands back a minimal profile -- so the case fails on
-   that separate, unfixed divergence rather than on anything this file grows
-   along with.  It gets added when that constructor does. */
+   Conspicuously present: linearized spaces derived from *named* profiles,
+   the two constructor families the profiles above exercise together.  Each
+   named base resolves to the canonical profile of its linear family, so the
+   cases cover both branches: the names whose linearization is another named
+   space (sRGB, extended sRGB, gray, Extended gray, BT.709, Display P3 and an
+   HDR spelling of it, BT.2020, and a repeated linear sRGB, which has to be
+   the identity), the five names with no linear twin whose linearization is a
+   synthesized canonical profile (Adobe RGB, ACES CG, ROMM, DCI-P3 and
+   CoreMedia 709), and the three names with no linearized form at all. */
 static void dump_constructed(const char *key, CGColorSpaceRef cs)
 {
     CFDataRef d;
@@ -671,6 +672,67 @@ int main(int argc, char **argv)
         dump_constructed("lin_rgb", lin);
         dump_constructed("ext_disp", CGColorSpaceCreateExtended(p3));
         CFRelease(p3);
+    }
+    /* The named linearizations, in the same fixed order.  lin_srgb through
+       lin_lin_srgb, lin_gray through lin_p3_pq and lin_2020 exercise the
+       twin branch; lin_adobe through lin_acescg the five synthesized
+       profiles; lin_lab, lin_xyz and lin_cmyk the names with no linearized
+       form.  Each checks the byte-for-byte profile and the flags a
+       linearized space carries, which is what distinguishes the twin cases
+       from a generic rebuild. */
+    {
+        static const char *const twin[][2] = {
+            { "lin_srgb", "kCGColorSpaceSRGB" },
+            { "lin_ext_srgb", "kCGColorSpaceExtendedSRGB" },
+            { "lin_lin_srgb", "kCGColorSpaceLinearSRGB" },
+            { "lin_gray", "kCGColorSpaceGenericGrayGamma2_2" },
+            { "lin_ext_gray", "kCGColorSpaceExtendedGray" },
+            { "lin_709", "kCGColorSpaceITUR_709" },
+            { "lin_p3", "kCGColorSpaceDisplayP3" },
+            { "lin_p3_pq", "kCGColorSpaceDisplayP3_PQ" },
+            { "lin_2020", "kCGColorSpaceITUR_2020" },
+        };
+        static const char *const synth[][2] = {
+            { "lin_adobe", "kCGColorSpaceAdobeRGB1998" },
+            { "lin_acescg", "kCGColorSpaceACESCGLinear" },
+            { "lin_romm", "kCGColorSpaceROMMRGB" },
+            { "lin_dcip3", "kCGColorSpaceDCIP3" },
+            { "lin_coremedia709", "kCGColorSpaceCoreMedia709" },
+        };
+        static const char *const nothing[][2] = {
+            { "lin_lab", "kCGColorSpaceGenericLab" },
+            { "lin_xyz", "kCGColorSpaceGenericXYZ" },
+            { "lin_cmyk", "kCGColorSpaceGenericCMYK" },
+        };
+        size_t i;
+
+        for (i = 0; i < sizeof twin / sizeof *twin; i++) {
+            CFStringRef k = CFStringCreateWithCString(NULL, twin[i][1],
+                kCFStringEncodingUTF8);
+            CGColorSpaceRef b = CGColorSpaceCreateWithName(k);
+
+            CFRelease(k);
+            dump_constructed(twin[i][0], CGColorSpaceCreateLinearized(b));
+            CFRelease(b);
+        }
+        for (i = 0; i < sizeof synth / sizeof *synth; i++) {
+            CFStringRef k = CFStringCreateWithCString(NULL, synth[i][1],
+                kCFStringEncodingUTF8);
+            CGColorSpaceRef b = CGColorSpaceCreateWithName(k);
+
+            CFRelease(k);
+            dump_constructed(synth[i][0], CGColorSpaceCreateLinearized(b));
+            CFRelease(b);
+        }
+        for (i = 0; i < sizeof nothing / sizeof *nothing; i++) {
+            CFStringRef k = CFStringCreateWithCString(NULL, nothing[i][1],
+                kCFStringEncodingUTF8);
+            CGColorSpaceRef b = CGColorSpaceCreateWithName(k);
+
+            CFRelease(k);
+            dump_constructed(nothing[i][0], CGColorSpaceCreateLinearized(b));
+            CFRelease(b);
+        }
     }
     return 0;
 }
