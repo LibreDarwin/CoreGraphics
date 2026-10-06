@@ -93,11 +93,263 @@ static void print_utf16(const unsigned char *p, size_t n)
     }
 }
 
+/* The number of CLUT entries a lut geometry describes, or (size_t)-1 when the
+   geometry is not believable.  A CLUT is grid^in * out; everything here is a
+   few tens of thousands of entries at most, so the product cap below reads
+   anything larger as garbage rather than believed.  The generic gamut table
+   runs at a grid of 21, past the 2..17 the spec allows, so only the absurd
+   is refused. */
+static size_t lut_clut(unsigned in, unsigned out, unsigned grid)
+{
+    size_t n = 1;
+    unsigned i;
+
+    if (in > 16 || out > 16 || grid < 2)
+        return (size_t)-1;
+    for (i = 0; i < in; i++) {
+        n *= grid;
+        if (n > ((size_t)1 << 20) / 17)
+            return (size_t)-1;
+    }
+    return n * out;
+}
+
+/* The min, max and sum of up to want entries, stepping stride bytes per entry
+   and never past the bytes the block actually holds.  Both sides scan the
+   same bytes, so the transcript stays a pure function of the block, and the
+   count that is returned lets a truncated table print the rows it has. */
+static size_t table_stats(const unsigned char *p, size_t avail, size_t want,
+    unsigned stride, uint32_t *sum, uint32_t *mn, uint32_t *mx)
+{
+    size_t i, n = avail / (size_t)stride;
+    uint32_t s = 0, lo = (uint32_t)-1, hi = 0;
+
+    if (n > want)
+        n = want;
+    for (i = 0; i < n; i++) {
+        uint32_t v = stride == 2 ? be16(p + 2 * i) : p[i];
+        s += v;
+        if (v < lo)
+            lo = v;
+        if (v > hi)
+            hi = v;
+    }
+    *sum = s;
+    *mn = n ? lo : 0;
+    *mx = n ? hi : 0;
+    return n;
+}
+
+/* One 'mft1'/'mft2' block.  The shapes the writers here produce are the 8-bit
+   lut8, the 16-bit lut16 and the lut8to16 hybrid, and all three share this
+   header: channels, grid and matrix, with the lut16 pair carrying the entry
+   counts its 16-bit tables need.  A read only ever touches bytes the block
+   holds, and the block's total length decides whether the wide or the narrow
+   input tables are believed, so a recovered constant that runs short of the
+   shape its own header promises -- the generic Lab and XYZ LUT does -- prints
+   the rows it actually has and the tail, rather than being misread. */
+static void dump_lut(const unsigned char *p, size_t len, const char *tag)
+{
+    unsigned in, out, grid, inE = 0, outE = 0;
+    size_t clut, base;
+    unsigned i;
+    int iw, ow;
+
+    if (len < 56) {
+        printf("lut %s <short>\n", tag);
+        return;
+    }
+    in = p[8];
+    out = p[9];
+    grid = p[10];
+    printf("lut %s sig=%.4s in=%u out=%u grid=%u matrix", tag,
+        (const char *)p, in, out, grid);
+    for (i = 0; i < 9; i++)
+        printf("%s0x%08x", i ? " " : "=", be32(p + 12 + 4 * i));
+    putchar('\n');
+
+    clut = lut_clut(in, out, grid);
+    if (clut == (size_t)-1) {
+        printf("lut %s <unparsed geometry>\n", tag);
+        return;
+    }
+    if (memcmp(p, "mft1", 4) == 0) {
+        iw = ow = 0;
+        inE = outE = 256;
+    } else if (memcmp(p, "mft2", 4) == 0) {
+        inE = be16(p + 48);
+        outE = be16(p + 50);
+        if (inE > 4096 || outE > 4096) {
+            printf("lut %s <entry count out of range>\n", tag);
+            return;
+        }
+        /* Prefer the 16-bit input tables unless they would run past the end
+           of the block, in which case the half-width ones of lut8to16 do. */
+        iw = ow = 1;
+        if (56 + (size_t)in * inE * 2 + clut * 2 > len)
+            iw = 0;
+    } else {
+        printf("lut %s <unknown sig>\n", tag);
+        return;
+    }
+
+    /* The input ramps, then the CLUT, then the output ramps, each row's min,
+       max and sum of as many entries as the block still holds. */
+    base = 56;
+    for (i = 0; i < in && base < len; i++) {
+        uint32_t sum, mn, mx;
+        size_t n = table_stats(p + base, len - base, inE, iw ? 2 : 1,
+            &sum, &mn, &mx);
+
+        printf("lut_tab %s in i=%u n=%zu min=%u max=%u sum=%u\n", tag, i,
+            n, mn, mx, (unsigned)sum);
+        base += (size_t)inE * (iw ? 2 : 1);
+    }
+    if (base < len) {
+        uint32_t sum, mn, mx;
+        size_t n = table_stats(p + base, len - base, clut, ow ? 2 : 1,
+            &sum, &mn, &mx);
+
+        printf("lut_tab %s clut n=%zu min=%u max=%u sum=%u\n", tag, n,
+            mn, mx, (unsigned)sum);
+        base += clut * (size_t)(ow ? 2 : 1);
+    }
+    for (i = 0; i < out && base < len; i++) {
+        uint32_t sum, mn, mx;
+        size_t n = table_stats(p + base, len - base, outE, ow ? 2 : 1,
+            &sum, &mn, &mx);
+
+        printf("lut_tab %s out i=%u n=%zu min=%u max=%u sum=%u\n", tag, i,
+            n, mn, mx, (unsigned)sum);
+        base += (size_t)outE * (ow ? 2 : 1);
+    }
+    if (base < len)
+        printf("lut %s tail=%zu\n", tag, len - base);
+}
+
+/* One 'mAB '/'mBA ' block.  The five section offsets at 12 say where B, the
+   matrix, M, the CLUT and A begin, so their spans are read from the offsets
+   themselves; B and A (and the M sections of these profiles) are runs of
+   curve/para tags walked from each section's start and stopped by the first
+   signature the walk does not know or the first tag that would run past the
+   section's end.  The hex below is the ground truth for the parts a parse
+   does not name. */
+static void dump_alt(const unsigned char *p, size_t len, const char *tag)
+{
+    static const char *const part[5] = { "B", "Mtx", "M", "CLUT", "A" };
+    uint32_t off[5];
+    int i;
+
+    if (len < 32) {
+        printf("lut_alt %s <short>\n", tag);
+        return;
+    }
+    for (i = 0; i < 5; i++)
+        off[i] = be32(p + 12 + 4 * i);
+    printf("lut_alt %s sig=%.4s in=%u out=%u b=0x%x mtx=0x%x m=0x%x "
+        "clut=0x%x a=0x%x\n", tag, (const char *)p, p[8], p[9], off[0],
+        off[1], off[2], off[3], off[4]);
+
+    for (i = 0; i < 5; i++) {
+        size_t j, end;
+        uint32_t o = off[i];
+
+        if (o == 0) {
+            printf("lut_sec %s part=%s off=0 <absent>\n", tag, part[i]);
+            continue;
+        }
+        if (o >= len) {
+            printf("lut_sec %s part=%s off=0x%x <out of bounds>\n", tag,
+                part[i], o);
+            continue;
+        }
+        end = len;
+        for (j = 0; j < 5; j++)
+            if (off[j] > o && off[j] <= len && off[j] < end)
+                end = off[j];
+        printf("lut_sec %s part=%s off=0x%x span=0x%zx\n", tag, part[i], o,
+            end - o);
+
+        if (i == 1) {
+            /* The matrix is 12 fixed-point words; the pad between the matrix
+               and M is inside the section, so it prints as zero words. */
+            size_t k;
+
+            printf("lut_sec %s part=Mtx matrix", tag);
+            for (k = 0; k < 12 && o + 4 * (k + 1) <= end; k++)
+                printf("%s0x%08x", k ? " " : "=", be32(p + o + 4 * k));
+            putchar('\n');
+        } else if (i == 3) {
+            /* A CLUT begins with its grid points, one byte per input. */
+            size_t g = p[8] < 3 ? p[8] : 3, k;
+
+            printf("lut_sec %s part=CLUT grid=", tag);
+            for (k = 0; k < g && o + k + 1 <= end; k++)
+                printf("%s%02x", k ? " " : "", p[o + k]);
+            putchar('\n');
+        } else {
+            /* B, M and A are runs of curve/para tags. */
+            int k = 0;
+
+            while (o + 12 <= end) {
+                const char *s = (const char *)p + o;
+                size_t clen;
+
+                if (memcmp(s, "curv", 4) == 0) {
+                    unsigned count = be32(p + o + 8);
+
+                    clen = 12 + 2 * (size_t)count;
+                    if (clen > end - o)
+                        break;
+                    if (count == 0) {
+                        printf("lut_curv %s part=%s k=%d identity\n", tag,
+                            part[i], k);
+                    } else if (count == 1) {
+                        printf("lut_curv %s part=%s k=%d gamma=0x%04x\n",
+                            tag, part[i], k, be16(p + o + 12));
+                    } else {
+                        printf("lut_curv %s part=%s k=%d count=%u "
+                            "first=0x%04x last=0x%04x\n", tag, part[i], k,
+                            count, be16(p + o + 12),
+                            be16(p + o + 12 + 2 * (count - 1)));
+                    }
+                } else if (memcmp(s, "para", 4) == 0) {
+                    static const unsigned char np[5] = { 1, 3, 4, 5, 7 };
+                    unsigned fn = be16(p + o + 8);
+                    unsigned n = fn < 5 ? np[fn] : 0, q;
+
+                    clen = 12 + 4 * (size_t)n;
+                    if (clen > end - o)
+                        break;
+                    printf("lut_para %s part=%s k=%d function=%u", tag,
+                        part[i], k, fn);
+                    for (q = 0; q < n; q++)
+                        printf(" p%u=0x%08x", q, be32(p + o + 12 + 4 * q));
+                    putchar('\n');
+                } else {
+                    break;
+                }
+                o += clen;
+                k++;
+                if (k >= 64)
+                    break;
+            }
+        }
+    }
+}
+
 /* One tag's block, parsed where its type is understood and always hexed.  The
    'tag' argument names the tag, so a mismatch report says which one it was. */
 static void dump_block(const unsigned char *p, size_t len, const char *tag)
 {
     size_t i, j;
+
+    printf("blk %s sig=", tag);
+    if (len >= 4)
+        printf("%.4s", (const char *)p);
+    else
+        printf("----");
+    printf(" len=%zu\n", len);
 
     if (len >= 4) {
         const char *sig = (const char *)p;
@@ -204,10 +456,14 @@ static void dump_block(const unsigned char *p, size_t len, const char *tag)
         } else if (!memcmp(sig, "sig ", 4)) {
             if (len >= 12)
                 printf("sig %s %.4s\n", tag, (const char *)p + 8);
+        } else if (!memcmp(sig, "mft1", 4) || !memcmp(sig, "mft2", 4)) {
+            dump_lut(p, len, tag);
+        } else if (!memcmp(sig, "mAB ", 4) || !memcmp(sig, "mBA ", 4)) {
+            dump_alt(p, len, tag);
         }
-        /* mft1, mft2, mAB , mBA  and the stored extras (vcgt, ndin, gamt,
-           ...) have no parser here: the hex below still makes the transcript
-           provably byte-equivalent, which is what the differential needs. */
+        /* The stored extras (vcgt, ndin, ...) are recovered constants and stay
+           opaque: their hex below still makes the transcript provably
+           byte-equivalent, which is what the differential needs. */
     }
 
     printf("hex %s ", tag);
