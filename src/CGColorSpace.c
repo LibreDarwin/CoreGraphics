@@ -150,15 +150,6 @@ struct CGColorSpace {
        neither.  Deriving it from the profile would mean looking for an
        identity tone curve, which is what the flag records. */
     bool linearized;
-    /* Whether a linearized space was built from a calibrated base.  This is
-       what keeps CGColorSpaceIsWideGamutRGB answerable once the type of a
-       linearized space is fixed: a calibrated and a named base both linearize
-       to a type-6 space -- the type cannot tell them apart -- yet Apple calls
-       the calibrated-derived one wide gamut whatever its primaries and the
-       named-derived one wide or not by its primaries.  The distinction is
-       only meaningful for a linearized space, and the extended-range flag
-       already short-circuits the answer, so nothing else reads it. */
-    bool linearizedCalibrated;
     /* The space's colorants as nine s15Fixed16, when the profile carries none.
 
        CGColorSpaceIsWideGamutRGB otherwise reads them out of the profile's
@@ -8658,6 +8649,27 @@ static CGColorSpaceRef CGColorSpaceCreateNamedHDR(CFStringRef name)
     return NULL;
 }
 
+/* The slot the profile a name built lives in, or -1 for anything that is not
+   one of the ten HDR spellings.  Both columns are accepted, so an alias
+   answers the slot its reported spelling would.
+
+   Matching on the name rather than the profile is what keeps the derived
+   spaces out: a linearized HDR space reports its twin's name
+   (LinearITUR_2020, LinearSRGB) and an extended one either its extended
+   spelling or none at all, so every derivative falls through to -1 -- which
+   is the answer it gives. */
+static int CGColorSpaceHDRSlotForName(const char *name)
+{
+    int i;
+
+    if (name == NULL)
+        return -1;
+    for (i = 0; i < CGColorSpaceNamedHDRCount; i++)
+        if (strcmp(name, CGColorSpaceNamedHDR[i].name) == 0
+            || strcmp(name, CGColorSpaceNamedHDR[i].reported) == 0)
+            return CGColorSpaceNamedHDR[i].slot;
+    return -1;
+}
 
 /* Lab.
 
@@ -9146,6 +9158,40 @@ static int mluc_text(const unsigned char *tag, size_t len,
     return 1;
 }
 
+/* Some of the bundled profiles -- the gray and RGB families' originals --
+   describe themselves with the version-2 'desc' tag instead: a four-byte
+   character count, the NUL-terminated string it counts, then the unicode and
+   scriptcode fields.  Apple leaves those trailing fields zeroed in every
+   linearized record, but the originals carry data there, so the record length
+   is not a constant; only the trailer the writer emits is, and it is 78 bytes,
+   which is what makes a linearized 'desc' asciiCount + 90 long. */
+enum {
+    CGICCV2DescTrailerLength = 78
+};
+
+static int v2desc_text(const unsigned char *tag, size_t len,
+    const unsigned char **text, size_t *textLen)
+{
+    uint32_t count;
+
+    if (len < 12 + CGICCV2DescTrailerLength || memcmp(tag, "desc", 4) != 0)
+        return 0;
+    count = get_be32(tag + 8);
+    if (count == 0 || (size_t)count > len - 12)
+        return 0;
+    *text = tag + 12;
+    *textLen = count;
+    return 1;
+}
+
+/* " Linearized", the suffix both writers append in their record's own
+   encoding -- UTF-16BE for an mluc, ASCII for a version-2 'desc'.  The ASCII
+   spelling is NUL-terminated so that appending it to a string whose own NUL it
+   replaces keeps the count in step: the new count is the old plus eleven. */
+static const unsigned char CGICCLinearizedASCIIWord[] = {
+    0x20, 0x4c, 0x69, 0x6e, 0x65, 0x61, 0x72, 0x69, 0x7a, 0x65, 0x64, 0x00
+};
+
 /* " Linearized", in the UTF-16BE an mluc stores its text in. */
 static const unsigned char CGICCLinearizedWord[] = {
     0x00,  0x20,  0x00,  0x4c,  0x00,  0x69,  0x00,  0x6e,  0x00,  0x65,
@@ -9439,16 +9485,17 @@ CGColorSpaceRef CGColorSpaceCreateLinearizedNamedProfile(
     s->profile = p;
     s->profileLen = len;
     s->linearized = true;
-    s->linearizedCalibrated = false;
     s->extended = extended;
     return s;
 }
 
 /* Resolve a named base to the canonical linear space of its family; NULL if
-   the name has no linearized form.  Unrecognized named spaces fall through
-   so the caller's tag-rebuilding path can try them the generic way. */
+   the name has no linearized form.  *matched says whether the name was one of
+   the rules at all: the three generic families have no rule and leave it
+   false, so the caller's tag-rebuilding path can linearize them the generic
+   way, while the Lab, XYZ and CMYK names match a rule that answers NULL. */
 static CGColorSpaceRef CGColorSpaceLinearizeNamed(struct CGColorSpace *base,
-    bool extended)
+    bool extended, bool *matched)
 {
     static const struct {
         const unsigned char *p;
@@ -9462,12 +9509,14 @@ static CGColorSpaceRef CGColorSpaceLinearizeNamed(struct CGColorSpace *base,
     };
     size_t i;
 
+    *matched = false;
     for (i = 0; i < sizeof CGLinearizeNamedRules / sizeof *CGLinearizeNamedRules;
         i++) {
         const struct cg_named_linear_rule *r = &CGLinearizeNamedRules[i];
 
         if (strcmp(base->name, r->name) != 0)
             continue;
+        *matched = true;
         if (r->twin) {
             CGColorSpaceRef twin, ext;
             CFStringRef key = CFStringCreateWithCString(kCFAllocatorDefault,
@@ -9487,7 +9536,6 @@ static CGColorSpaceRef CGColorSpaceLinearizeNamed(struct CGColorSpace *base,
                 ext = CGColorSpaceCreateExtended(twin);
                 if (ext) {
                     ((struct CGColorSpace *)ext)->linearized = true;
-                    ((struct CGColorSpace *)ext)->linearizedCalibrated = false;
                 }
                 CGColorSpaceRelease(twin);
                 return ext;
@@ -9520,6 +9568,7 @@ static CGColorSpaceRef CGColorSpaceCreateLinearizedInternal(
     long wtptAt, colorAt[3], descAt;
     size_t ntags;
     bool rgb;
+    bool descV2;
     int i;
 
     if (!base || !base->profile)
@@ -9527,10 +9576,17 @@ static CGColorSpaceRef CGColorSpaceCreateLinearizedInternal(
     /* A named base answers its family's canonical linear form -- the linear
        twin where there is one, a synthesized canonical profile for the five
        families without one, and nothing at all for the Lab, XYZ and CMYK
-       names.  No named space therefore reaches the tag-rebuilding path,
-       which exists for profiles the caller built. */
-    if (base->name)
-        return CGColorSpaceLinearizeNamed(base, extended);
+       names.  The three generic families have no canonical form and no rule,
+       so they fall through to the tag-rebuilding path below with every
+       profile the caller built. */
+    if (base->name) {
+        bool matched;
+        CGColorSpaceRef named = CGColorSpaceLinearizeNamed(base, extended,
+            &matched);
+
+        if (matched)
+            return named;
+    }
     /* Only a gray or RGB profile can be linearized.  The device and pattern
        spaces have no profile, and a Lab profile is a device class of its own
        whose tags are not tone curves -- so the data colour space in the
@@ -9545,11 +9601,20 @@ static CGColorSpaceRef CGColorSpaceCreateLinearizedInternal(
 
     /* Everything the new profile keeps is read out of the base's, so a base
        that is itself linearized or extended -- which is why chaining works
-       -- needs no special case. */
+       -- needs no special case.  The description is written in whichever of
+       the two encodings the base used, so the record's form is noted here. */
     descAt = icc_find_tag(base->profile, base->profileLen, "desc", &tagLen);
-    if (descAt < 0 || !mluc_text(base->profile + descAt, tagLen, &baseText,
-        &baseTextLen))
+    if (descAt < 0)
         return NULL;
+    descV2 = memcmp(base->profile + descAt, "desc", 4) == 0;
+    if (descV2) {
+        if (!v2desc_text(base->profile + descAt, tagLen, &baseText,
+            &baseTextLen))
+            return NULL;
+    } else if (!mluc_text(base->profile + descAt, tagLen, &baseText,
+        &baseTextLen)) {
+        return NULL;
+    }
     wtptAt = icc_find_tag(base->profile, base->profileLen, "wtpt", &tagLen);
     if (wtptAt < 0 || tagLen != CGICCXYZLength)
         return NULL;
@@ -9567,8 +9632,12 @@ static CGColorSpaceRef CGColorSpaceCreateLinearizedInternal(
     tags = rgb ? CGICCLinearizedRGBTags : CGICCLinearizedGrayTags;
     ntags = rgb ? sizeof CGICCLinearizedRGBTags / sizeof *CGICCLinearizedRGBTags
         : sizeof CGICCLinearizedGrayTags / sizeof *CGICCLinearizedGrayTags;
-    descLen = CGICCMLUCRecordLength + baseTextLen
-        + sizeof CGICCLinearizedWord;
+    if (descV2)
+        descLen = 12 + baseTextLen + sizeof CGICCLinearizedASCIIWord - 1
+            + CGICCV2DescTrailerLength;
+    else
+        descLen = CGICCMLUCRecordLength + baseTextLen
+            + sizeof CGICCLinearizedWord;
 
     /* The tag data follows the table, each block aligned to 4.  The three
        tone curves share the last block, so a profile ends just after it.
@@ -9626,11 +9695,25 @@ static CGColorSpaceRef CGColorSpaceCreateLinearizedInternal(
     put_be32(p + CGICCTagCountOffset, (int32_t)ntags);
 
     baseDesc = p + descOff;
-    memcpy(baseDesc, base->profile + descAt, CGICCMLUCRecordLength);
-    put_be32(baseDesc + 20, (int32_t)(baseTextLen + sizeof CGICCLinearizedWord));
-    memcpy(baseDesc + CGICCMLUCRecordLength, baseText, baseTextLen);
-    memcpy(baseDesc + CGICCMLUCRecordLength + baseTextLen,
-        CGICCLinearizedWord, sizeof CGICCLinearizedWord);
+    if (descV2) {
+        /* Rebuild the version-2 record: the two signature words, the count,
+           the text with its NUL replaced by the suffix, and the trailer Apple
+           leaves zeroed.  A fresh record is what makes the trailer constant
+           even though the base's own may carry a scriptcode description. */
+        memcpy(baseDesc, "desc", 4);
+        put_be32(baseDesc + 8, (int32_t)(baseTextLen
+            + sizeof CGICCLinearizedASCIIWord - 1));
+        memcpy(baseDesc + 12, baseText, baseTextLen - 1);
+        memcpy(baseDesc + 12 + baseTextLen - 1, CGICCLinearizedASCIIWord,
+            sizeof CGICCLinearizedASCIIWord);
+    } else {
+        memcpy(baseDesc, base->profile + descAt, CGICCMLUCRecordLength);
+        put_be32(baseDesc + 20,
+            (int32_t)(baseTextLen + sizeof CGICCLinearizedWord));
+        memcpy(baseDesc + CGICCMLUCRecordLength, baseText, baseTextLen);
+        memcpy(baseDesc + CGICCMLUCRecordLength + baseTextLen,
+            CGICCLinearizedWord, sizeof CGICCLinearizedWord);
+    }
 
     memcpy(p + wtptOff, base->profile + wtptAt, CGICCXYZLength);
     if (rgb) {
@@ -9703,14 +9786,14 @@ static CGColorSpaceRef CGColorSpaceCreateLinearizedInternal(
     s->model = base->model;
     s->type = CGColorSpaceTypeICC;
     s->ncomp = base->ncomp;
-    s->name = base->name;
+    /* The rebuilt profile is a profile of its own: Apple reports no name for
+       it, so a linearized generic RGB or gray space answers '-' even though
+       the base it came from is named. */
+    s->name = NULL;
     s->base = NULL;
     s->profile = p;
     s->profileLen = len;
     s->linearized = true;
-    s->linearizedCalibrated = base->linearizedCalibrated
-        || base->type == CGColorSpaceTypeCalibratedRGB
-        || base->type == CGColorSpaceTypeCalibratedMonochrome;
     s->extended = extended;
     return s;
 }
@@ -9726,6 +9809,66 @@ CGColorSpaceRef CGColorSpaceCreateExtendedLinearized(
     return CGColorSpaceCreateLinearizedInternal(baseSpace, true);
 }
 
+/* The name each base's extended spelling reports, looked up by the base's name.
+   A name that is absent means the base's extended spelling is name-less; the
+   generic gray and RGB families, Adobe RGB, ITUR_709, ROMM, DCI-P3, ACES CG,
+   CoreMedia 709 and the OETF/sRGB-gamma spellings are all of that kind, and so
+   is any base without a name at all -- the synthesized calibrated profiles.
+
+   The extended names answer themselves, so an extended spelling of an
+   extended space is that same space. */
+static const char *CGColorSpaceExtendedNameFor(const char *name)
+{
+    static const struct {
+        const char *base;
+        const char *extended;
+    } names[] = {
+        { "kCGColorSpaceGenericGray", NULL },
+        { "kCGColorSpaceGenericGrayGamma2_2", "kCGColorSpaceExtendedGray" },
+        { "kCGColorSpaceExtendedGray", "kCGColorSpaceExtendedGray" },
+        { "kCGColorSpaceLinearGray", "kCGColorSpaceExtendedLinearGray" },
+        { "kCGColorSpaceExtendedLinearGray",
+            "kCGColorSpaceExtendedLinearGray" },
+        { "kCGColorSpaceGenericRGB", NULL },
+        { "kCGColorSpaceGenericRGBLinear", NULL },
+        { "kCGColorSpaceSRGB", "kCGColorSpaceExtendedSRGB" },
+        { "kCGColorSpaceExtendedSRGB", "kCGColorSpaceExtendedSRGB" },
+        { "kCGColorSpaceLinearSRGB", "kCGColorSpaceExtendedLinearSRGB" },
+        { "kCGColorSpaceExtendedLinearSRGB",
+            "kCGColorSpaceExtendedLinearSRGB" },
+        { "kCGColorSpaceDisplayP3", "kCGColorSpaceExtendedDisplayP3" },
+        { "kCGColorSpaceExtendedDisplayP3",
+            "kCGColorSpaceExtendedDisplayP3" },
+        { "kCGColorSpaceLinearDisplayP3",
+            "kCGColorSpaceExtendedLinearDisplayP3" },
+        { "kCGColorSpaceExtendedLinearDisplayP3",
+            "kCGColorSpaceExtendedLinearDisplayP3" },
+        { "kCGColorSpaceITUR_2020", "kCGColorSpaceExtendedITUR_2020" },
+        { "kCGColorSpaceExtendedITUR_2020",
+            "kCGColorSpaceExtendedITUR_2020" },
+        { "kCGColorSpaceLinearITUR_2020",
+            "kCGColorSpaceExtendedLinearITUR_2020" },
+        { "kCGColorSpaceExtendedLinearITUR_2020",
+            "kCGColorSpaceExtendedLinearITUR_2020" },
+        { "kCGColorSpaceAdobeRGB1998", NULL },
+        { "kCGColorSpaceACESCGLinear", NULL },
+        { "kCGColorSpaceROMMRGB", NULL },
+        { "kCGColorSpaceDCIP3", NULL },
+        { "kCGColorSpaceCoreMedia709", NULL },
+        { "kCGColorSpaceITUR_709", NULL },
+        { "kCGColorSpaceITUR_2020_sRGBGamma", NULL },
+        { "kCGColorSpaceDisplayP3_709OETF", NULL },
+    };
+    size_t i;
+
+    if (name == NULL)
+        return NULL;
+    for (i = 0; i < sizeof names / sizeof *names; i++)
+        if (strcmp(name, names[i].base) == 0)
+            return names[i].extended;
+    return NULL;
+}
+
 /* The extended variant of a calibrated space.  This one synthesises nothing:
    the profile is the base's, unchanged down to the profile ID, and the only
    difference between the two spaces is the flag. */
@@ -9736,6 +9879,10 @@ CGColorSpaceRef CGColorSpaceCreateExtended(CGColorSpaceRef baseSpace)
     unsigned char *p;
 
     if (!base || !base->profile)
+        return NULL;
+    /* No HDR spelling has an extended form: the PQ and HLG spaces answer NULL
+       rather than a flagged copy of themselves. */
+    if (CGColorSpaceHDRSlotForName(base->name) >= 0)
         return NULL;
     if (memcmp(base->profile + CGICCColorSpaceOffset, "GRAY", 4) != 0
         && memcmp(base->profile + CGICCColorSpaceOffset, "RGB ", 4) != 0)
@@ -9754,7 +9901,9 @@ CGColorSpaceRef CGColorSpaceCreateExtended(CGColorSpaceRef baseSpace)
     s->model = base->model;
     s->type = base->type;
     s->ncomp = base->ncomp;
-    s->name = base->name;
+    /* The extended spelling, not the base's name: sRGB becomes ExtendedSRGB,
+       and a family without one is name-less like the synthesized spaces. */
+    s->name = CGColorSpaceExtendedNameFor(base->name);
     s->base = NULL;
     s->profile = p;
     s->profileLen = base->profileLen;
@@ -9957,6 +10106,80 @@ static int icc_class_ok(const unsigned char *cls, int nclass)
     return 0;
 }
 
+/* The built-in space whose profile is exactly `profile`, or NULL.  The lookup
+   builds the name's CFString and asks CGColorSpaceCreateWithName, which hands
+   back the named singleton without copying anything. */
+static struct CGColorSpace *CGColorSpaceICCProfileMatch(const char *cand,
+    const unsigned char *profile, size_t len)
+{
+    CFStringRef nm = CFStringCreateWithCString(NULL, cand,
+        kCFStringEncodingASCII);
+    struct CGColorSpace *m;
+
+    if (!nm)
+        return NULL;
+    m = CGColorSpaceCreateWithName(nm);
+    CFRelease(nm);
+    if (!m || !m->profile || m->profileLen != len
+        || memcmp(m->profile, profile, len) != 0)
+        return NULL;
+    return m;
+}
+
+/* A profile handed to CGColorSpaceCreateWithICCData carries a name when its
+   bytes are one of the built-in profiles': Apple matches the data against its
+   profile table and hands back the name it finds there, along with the
+   extended-range flag, which rides along because two names that share one
+   profile differ in nothing else.
+
+   Several pairs do share their bytes -- the extended and linearized aliases
+   take their base's exact profile -- so the base spelling wins: a match whose
+   space is not extended is preferred to one that is, and a match that is
+   returned only when nothing better turns up.  GenericLab is the one name
+   left out, because it is the one built-in space Apple does not recover from
+   the profile it carries.  The three generic RGB names are looked up too,
+   even though CGColorSpaceBuiltInNames does not hold them because
+   CGColorSpaceNameFromID never hands them back. */
+static const char *CGColorSpaceICCRecognizedNameFor(
+    const unsigned char *profile, size_t len, bool *extended)
+{
+    static const char *const extra[] = {
+        "kCGColorSpaceGenericGray",
+        "kCGColorSpaceGenericRGB",
+        "kCGColorSpaceGenericRGBLinear"
+    };
+    const char *cand[CG_COLORSPACE_BUILT_IN_COUNT + 3];
+    const char *fallback = NULL;
+    int ncand = 0;
+    int i;
+
+    for (i = 1; i < CG_COLORSPACE_BUILT_IN_COUNT; i++) {
+        const char *name = CGColorSpaceBuiltInNames[i];
+
+        if (name && strcmp(name, "kCGColorSpaceGenericLab") != 0)
+            cand[ncand++] = name;
+    }
+    for (i = 0; i < (int)(sizeof extra / sizeof extra[0]); i++)
+        cand[ncand++] = extra[i];
+
+    for (i = 0; i < ncand; i++) {
+        struct CGColorSpace *m = CGColorSpaceICCProfileMatch(cand[i],
+            profile, len);
+
+        if (!m)
+            continue;
+        if (!m->extended) {
+            *extended = false;
+            return m->name;
+        }
+        if (!fallback) {
+            fallback = m->name;
+            *extended = true;
+        }
+    }
+    return fallback;
+}
+
 /* CGColorSpaceCreateWithICCData.  Accepts an ICC profile the caller already
    has and answers the model and component count its header declares, keeping
    the profile bytes verbatim so CGColorSpaceCopyICCData hands them back
@@ -10103,10 +10326,15 @@ CGColorSpaceRef CGColorSpaceCreateWithICCData(CFDataRef data)
     s->model = model;
     s->type = CGColorSpaceTypeICC;
     s->ncomp = ncomp;
-    /* A profile handed to us carries no built-in name: Apple recovers one by
-       matching the bytes against its profile table, which this step does not
-       have, so the name stays absent until that table exists. */
-    s->name = NULL;
+    /* A profile whose bytes are one of the built-ins' carries that space's
+       name and extended-range flag, exactly as Apple recovers them; every
+       other profile stays unnamed. */
+    {
+        bool extended = false;
+
+        s->name = CGColorSpaceICCRecognizedNameFor(copy, stored, &extended);
+        s->extended = extended;
+    }
     s->base = NULL;
     s->profile = copy;
     s->profileLen = stored;
@@ -10420,20 +10648,26 @@ bool CGColorSpaceSupportsOutput(CGColorSpaceRef space)
 
 bool CGColorSpaceIsHDR(CGColorSpaceRef space)
 {
-    (void)space;
-    return false;
+    struct CGColorSpace *s = space;
+
+    return CGColorSpaceHDRSlotForName(s ? s->name : NULL) >= 0;
 }
 
 bool CGColorSpaceIsHLGBased(CGColorSpaceRef space)
 {
-    (void)space;
-    return false;
+    struct CGColorSpace *s = space;
+    int slot = CGColorSpaceHDRSlotForName(s ? s->name : NULL);
+
+    /* The slots run PQ then HLG within each family, so an odd one is HLG. */
+    return slot >= 0 && (slot & 1) != 0;
 }
 
 bool CGColorSpaceIsPQBased(CGColorSpaceRef space)
 {
-    (void)space;
-    return false;
+    struct CGColorSpace *s = space;
+    int slot = CGColorSpaceHDRSlotForName(s ? s->name : NULL);
+
+    return slot >= 0 && (slot & 1) == 0;
 }
 
 bool CGColorSpaceIsWideGamutRGB(CGColorSpaceRef space)
@@ -10453,28 +10687,17 @@ bool CGColorSpaceIsWideGamutRGB(CGColorSpaceRef space)
         return s->model == kCGColorSpaceModelRGB;
 
     /* A linearized space -- the extended flag having failed -- still cannot
-       be answered from its type: after the corrections above it reports 6
-       (ICC) whatever its base was, while a calibrated and a named base answer
-       differently.  That is what the linearizedCalibrated flag exists for.
-       A gray base has no primaries to be wider than anything and so is never
-       wide; a calibrated RGB base is wide unless its colorants collapsed onto
-       the white point's block, which is degenerate and legible in the tag
-       table; and a named base answers from its primaries like the space it
-       was derived from would. */
+       be answered from its type: it reports 6 (ICC) whatever its base was.
+       Its rebuilt profile, though, is a real profile, and Apple answers from
+       its primaries exactly as it would answer that same profile handed to
+       CreateWithICCData: the colorants are what count, not that the base was
+       calibrated or named.  A gray base has no primaries to be wider than
+       anything and so is never wide. */
     if (s->linearized) {
         if (s->model != kCGColorSpaceModelRGB)
             return false;
         if (s->profile == NULL)
             return false;
-        if (s->linearizedCalibrated) {
-            size_t len;
-            long wtpt = icc_find_tag(s->profile, s->profileLen, "wtpt", &len);
-            long rXYZ = icc_find_tag(s->profile, s->profileLen, "rXYZ", &len);
-
-            if (wtpt < 0 || rXYZ < 0 || wtpt == rXYZ)
-                return false;
-            return true;
-        }
         return s->primaries != NULL
                ? icc_primaries_are_wide(s->primaries)
                : icc_rgb_is_wide(s->profile, s->profileLen);
@@ -10579,20 +10802,28 @@ const char *CGColorSpaceGetIdentifier(CGColorSpaceRef space)
 
 /* Conversions.  None applies to a space with no profile. */
 
-/* Color tables.  Only an indexed space has one, and no indexed space is
-   built by this step, so the count is always zero and the copy is always a
-   no-op that leaves the caller's buffer alone. */
+/* Color tables.  Only an indexed space has one: its count is the number of
+   slots in the lookup it was built with, and the copy hands back those slots
+   in order, three bytes per entry for an RGB base and one for a gray one.
+   Every other space has none -- the count is zero and the copy leaves the
+   caller's buffer alone. */
 
 size_t CGColorSpaceGetColorTableCount(CGColorSpaceRef space)
 {
-    (void)space;
-    return 0;
+    struct CGColorSpace *s = space;
+
+    if (!s || s->type != CGColorSpaceTypeIndexed)
+        return 0;
+    return s->lastIndex + 1;
 }
 
 void CGColorSpaceGetColorTable(CGColorSpaceRef space, uint8_t *table)
 {
-    (void)space;
-    (void)table;
+    struct CGColorSpace *s = space;
+
+    if (!s || !table || s->type != CGColorSpaceTypeIndexed || !s->indexed)
+        return;
+    memcpy(table, s->indexed, s->indexedLen);
 }
 
 /* Descriptors.  A pattern space has one; the device spaces do not. */
