@@ -11002,22 +11002,57 @@ CFArrayRef CGColorSpaceGetNames(CGColorSpaceRef space)
 /* Property list and standard-range variants (minimal/byte-identical fallbacks). */
 CFPropertyListRef CGColorSpaceCopyPropertyList(CGColorSpaceRef space)
 {
-    (void)space;
+    struct CGColorSpace *s = space;
+    if (!s)
+        return NULL;
+    /* If space has an ICC profile and we created from ICC data in general case,
+       Apple returns the ICC profile data as CFData for ICC-based spaces? 
+       But for recognized named profiles, sometimes returns name/number.
+       Our s->profile exists for ICC spaces; also s->name may be set for recognized ones.
+       Try to match common observed behavior: return name string for named spaces that are the canonical named ones. */
+    if (s->name) {
+        CFStringRef nm = CFStringCreateWithCString(kCFAllocatorDefault, s->name, kCFStringEncodingASCII);
+        if (nm) return (CFPropertyListRef)nm;
+    }
+    if (s->profile) {
+        return (CFPropertyListRef)CFDataCreate(kCFAllocatorDefault, s->profile, (CFIndex)s->profileLen);
+    }
     return NULL;
 }
 
+
 CGColorSpaceRef CGColorSpaceCreateWithPropertyList(CFPropertyListRef plist)
 {
-    (void)plist;
+    if (!plist)
+        return NULL;
+    CFTypeID tid = CFGetTypeID(plist);
+    if (tid == CFStringGetTypeID()) {
+        return CGColorSpaceCreateWithName((CFStringRef)plist);
+    }
+    if (tid == CFNumberGetTypeID()) {
+        /* Map common numeric IDs? Apple also accepts numbers for certain built-ins.
+           But easier to just try creating by name if it matches? Or not needed.
+           For now, pass through by trying to interpret as name string? */
+        CFStringRef s = CFCopyDescription(plist);
+        CGColorSpaceRef cs = s ? CGColorSpaceCreateWithName(s) : NULL;
+        if (s) CFRelease(s);
+        if (cs) return cs;
+    }
+    if (tid == CFDataGetTypeID()) {
+        return CGColorSpaceCreateWithICCData((CFDataRef)plist);
+    }
     return NULL;
 }
+
 
 CGColorSpaceRef CGColorSpaceCreateCopyWithStandardRange(CGColorSpaceRef space)
 {
     if (space == NULL)
         return NULL;
+    /* For now, return a retained copy as-is; full semantics per space type can be refined later if needed. */
     return CGColorSpaceRetain(space);
 }
+
 
 CGColorSpaceRef CGColorSpaceCreateWithColorSyncProfile(ColorSyncProfileRef profile, CFDictionaryRef options)
 {
