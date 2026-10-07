@@ -24,6 +24,7 @@
 
 #include <CoreGraphics/CoreGraphics.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <ColorSync/ColorSync.h>
 
 #include <stdint.h>
 #include <stdio.h>
@@ -499,6 +500,67 @@ int main(int argc, char **argv)
         cs = CGColorSpaceCreateICCBased(3, srgb_r, NULL, alt_rgb);
         probe("iccbased_nullp_alt", cs);
         if (cs) CGColorSpaceRelease(cs);
+
+
+        /* Property list and related roundtrips */
+        {
+            CFStringRef nm;
+            CGColorSpaceRef t, r;
+            CFPropertyListRef pl;
+            const char *names[][2] = {
+                {"kCGColorSpaceSRGB", "pl_srgb"},
+                {"kCGColorSpaceGenericGrayGamma2_2", "pl_gray"},
+                {"kCGColorSpaceGenericCMYK", "pl_cmyk"},
+                {"kCGColorSpaceDisplayP3", "pl_p3"},
+                {"kCGColorSpaceGenericXYZ", "pl_xyz"},
+                {"kCGColorSpaceGenericLab", "pl_lab"},
+            };
+            for (int i = 0; i < (int)(sizeof names/sizeof names[0]); i++) {
+                nm = CFStringCreateWithCString(NULL, names[i][0], kCFStringEncodingASCII);
+                t = nm ? CGColorSpaceCreateWithName(nm) : NULL;
+                CFRelease(nm);
+                if (t) {
+                    pl = CGColorSpaceCopyPropertyList(t);
+                    r = pl ? CGColorSpaceCreateWithPropertyList(pl) : NULL;
+                    probe(names[i][1], r);
+                    if (r) CGColorSpaceRelease(r);
+                    if (pl) CFRelease(pl);
+                    r = CGColorSpaceCreateCopyWithStandardRange(t);
+                    char lbl[64];
+                    snprintf(lbl, sizeof lbl, "stdcopy_%s", names[i][1]+3);
+                    probe(lbl, r);
+                    if (r) CGColorSpaceRelease(r);
+                    CGColorSpaceRelease(t);
+                }
+            }
+        }
+        {
+            CFStringRef nm = CFStringCreateWithCString(NULL, "kCGColorSpaceGenericCMYK", kCFStringEncodingASCII);
+            CGColorSpaceRef t = nm ? CGColorSpaceCreateWithName(nm) : NULL;
+            CFRelease(nm);
+            if (t) {
+                CFDataRef d = CGColorSpaceCopyICCData(t);
+                CGColorSpaceRef r = d ? CGColorSpaceCreateWithICCProfile(d) : NULL;
+                probe("iccprof_cmyk", r);
+                if (r) CGColorSpaceRelease(r);
+                if (d) CFRelease(d);
+                CGColorSpaceRelease(t);
+            }
+        }
+        {
+#ifdef kColorSyncSRGBProfile
+            ColorSyncProfileRef cp = ColorSyncProfileCreateWithName(kColorSyncSRGBProfile);
+            CGColorSpaceRef r = cp ? CGColorSpaceCreateWithColorSyncProfile(cp, NULL) : NULL;
+            probe("csprof_srgb", r);
+            if (r) CGColorSpaceRelease(r);
+            if (cp) CFRelease(cp);
+#endif
+        }
+        {
+            CGColorSpaceRef r = CGColorSpaceCreateWithPlatformColorSpace(NULL);
+            probe("plat_null", r);
+            if (r) CGColorSpaceRelease(r);
+        }
 
         CGColorSpaceRelease(alt_gray);
         CGColorSpaceRelease(alt_rgb);
