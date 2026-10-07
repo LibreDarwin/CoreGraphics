@@ -1,3 +1,6 @@
+
+#include <CoreFoundation/CoreFoundation.h>
+
 /* CoreGraphics - CGColorSpace.c
    Copyright (C) 2026, LibreDarwin
    SPDX-License-Identifier: BSD-3-Clause
@@ -10993,5 +10996,45 @@ CGColorSpaceRef CGColorSpaceGetAlternateColorSpace(CGColorSpaceRef space)
 CFArrayRef CGColorSpaceGetNames(CGColorSpaceRef space)
 {
     (void)space;
+    return NULL;
+}
+
+/* Property list and standard-range variants (minimal/byte-identical fallbacks). */
+CFPropertyListRef CGColorSpaceCopyPropertyList(CGColorSpaceRef space)
+{
+    (void)space;
+    return NULL;
+}
+
+CGColorSpaceRef CGColorSpaceCreateWithPropertyList(CFPropertyListRef plist)
+{
+    (void)plist;
+    return NULL;
+}
+
+CGColorSpaceRef CGColorSpaceCreateCopyWithStandardRange(CGColorSpaceRef space)
+{
+    if (space == NULL)
+        return NULL;
+    return CGColorSpaceRetain(space);
+}
+
+CGColorSpaceRef CGColorSpaceCreateWithColorSyncProfile(ColorSyncProfileRef profile, CFDictionaryRef options)
+{
+    (void)profile;
+    (void)options;
+    return NULL;
+}
+
+CGColorSpaceRef CGColorSpaceCreateWithICCProfile(CFDataRef data)
+{
+    if (data == NULL)
+        return NULL;
+    return CGColorSpaceCreateWithICCData(data);
+}
+
+CGColorSpaceRef CGColorSpaceCreateWithPlatformColorSpace(const void *ref)
+{
+    (void)ref;
     return NULL;
 }

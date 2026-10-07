@@ -531,3 +531,30 @@ CG_EXTERN void CGColorSpaceGetColorTable(CGColorSpaceRef cg_nullable space,
 CF_ASSUME_NONNULL_END
 
 #endif /* CGCOLORSPACE_H_ */
+
+/* Extended range marker (CFStringRef). */
+CG_EXTERN const CFStringRef kCGColorSpaceExtendedRange;
+
+#ifdef __has_include
+# if __has_include(<ColorSync/ColorSync.h>)
+#  include <ColorSync/ColorSync.h>
+# endif
+#endif
+
+CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateWithColorSyncProfile(
+    ColorSyncProfileRef __nullable, CFDictionaryRef __nullable options);
+
+CG_EXTERN CFPropertyListRef __nullable CGColorSpaceCopyPropertyList(
+    CGColorSpaceRef cg_nullable space);
+
+CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateWithPropertyList(
+    CFPropertyListRef cg_nullable plist);
+
+CG_EXTERN CGColorSpaceRef CGColorSpaceCreateCopyWithStandardRange(
+    CGColorSpaceRef cg_nullable space);
+
+CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateWithICCProfile(
+    CFDataRef cg_nullable data);
+
+CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateWithPlatformColorSpace(
+    const void * cg_nullable ref);
