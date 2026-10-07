@@ -10148,16 +10148,43 @@ static const char *CGColorSpaceICCRecognizedNameFor(
         "kCGColorSpaceGenericRGB",
         "kCGColorSpaceGenericRGBLinear"
     };
+    /* The linearized twins of a named space are never recognised again from
+       their bytes: reopening the profile Apple hands out for
+       kCGColorSpaceLinearSRGB answers no name at all, and the same holds for
+       the other three.  A reopen of Display P3, by contrast, is named, so
+       exclusion is by the linearized spelling, not the base.  The four
+       extended-linearized aliases carry the very same bytes as their linear
+       siblings -- an extended alias keeps its base's profile, and
+       linearizing an extended space lands on the extended linear spelling --
+       so they fall out the same way: reopen them and no name comes back. */
+    static const char *const unnamed[] = {
+        "kCGColorSpaceLinearSRGB",
+        "kCGColorSpaceLinearDisplayP3",
+        "kCGColorSpaceLinearITUR_2020",
+        "kCGColorSpaceLinearGray",
+        "kCGColorSpaceExtendedLinearSRGB",
+        "kCGColorSpaceExtendedLinearDisplayP3",
+        "kCGColorSpaceExtendedLinearITUR_2020",
+        "kCGColorSpaceExtendedLinearGray"
+    };
     const char *cand[CG_COLORSPACE_BUILT_IN_COUNT + 3];
     const char *fallback = NULL;
     int ncand = 0;
-    int i;
+    int i, j;
 
     for (i = 1; i < CG_COLORSPACE_BUILT_IN_COUNT; i++) {
         const char *name = CGColorSpaceBuiltInNames[i];
+        int excluded = 0;
 
-        if (name && strcmp(name, "kCGColorSpaceGenericLab") != 0)
-            cand[ncand++] = name;
+        if (name && strcmp(name, "kCGColorSpaceGenericLab") != 0) {
+            for (j = 0; j < (int)(sizeof unnamed / sizeof unnamed[0]); j++)
+                if (strcmp(name, unnamed[j]) == 0) {
+                    excluded = 1;
+                    break;
+                }
+            if (!excluded)
+                cand[ncand++] = name;
+        }
     }
     for (i = 0; i < (int)(sizeof extra / sizeof extra[0]); i++)
         cand[ncand++] = extra[i];
@@ -10741,28 +10768,50 @@ bool CGColorSpaceIsICCCompatible(CGColorSpaceRef space)
 
 bool CGColorSpaceIsPSLevel2Compatible(CGColorSpaceRef space)
 {
-    /* A synthesised profile is by construction a PS-Level-2 one, and Apple
-       reports it as such for every calibrated space. */
-    return space != NULL && space->profile != NULL;
+    struct CGColorSpace *s = space;
+
+    /* Only a gray or RGB space with a profile is a PostScript Level 2 one.
+       A device space has no profile to describe it and answers false, and so
+       do the CMYK, Lab and XYZ profiles -- the models whose profiles exist
+       only as a LUT, which PostScript Level 2 cannot express.  RGB is
+       decided by the model and not by any tag: the HDR families carry A2B0
+       and B2A0 LUT tags yet Apple still reports them Level-2, so a
+       tag-signature scan would misreport them. */
+    return s != NULL && s->profile != NULL
+        && (s->model == kCGColorSpaceModelMonochrome
+            || s->model == kCGColorSpaceModelRGB);
 }
 
 bool CGColorSpaceIgnoresIntent(CGColorSpaceRef space)
 {
-    (void)space;
-    /* True: with no ICC profile there is no intent to apply. */
-    return true;
+    struct CGColorSpace *s = space;
+
+    /* Apple answers true for every space except an ICC one whose model is
+       CMYK or Lab, which are the two models whose profile carries a LUT and
+       therefore ignores a rendering intent.  A generic RGB or XYZ, or a Lab
+       built by CGColorSpaceCreateLab (whose type is not ICC), applies it. */
+    return !(s != NULL && s->type == CGColorSpaceTypeICC
+        && (s->model == kCGColorSpaceModelCMYK
+            || s->model == kCGColorSpaceModelLab));
 }
 
 bool CGColorSpaceUsesITUR_2100TF(CGColorSpaceRef space)
 {
-    (void)space;
-    return false;
+    struct CGColorSpace *s = space;
+
+    /* The ten HDR names are exactly the spaces whose transfer function is the
+       ITU-R BT.2100 one: each family holds a PQ and an HLG twin. */
+    return CGColorSpaceHDRSlotForName(s ? s->name : NULL) >= 0;
 }
 
 int CGColorSpaceGetRenderingIntent(CGColorSpaceRef space)
 {
-    (void)space;
-    return 0;
+    struct CGColorSpace *s = space;
+
+    /* Only an ICC space has a rendering intent to hand back, and Apple
+       reports a fixed relative-colorimetric 3 for all of them, whatever the
+       profile's own value. */
+    return s != NULL && s->type == CGColorSpaceTypeICC ? 3 : 0;
 }
 
 /* ICC profile.  A space built by CGColorSpaceCreateWithICCData carries the

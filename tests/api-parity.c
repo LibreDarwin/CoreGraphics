@@ -8,8 +8,9 @@
  * and prints one deterministic line per space carrying the public accessor
  * surface: type, model, component count, name, base space, the full ICC
  * profile bytes, the extended range, HDR/HLG/PQ/wide-gamut flags, output
- * support and self-equality, with the indexed colour table when there is
- * one.
+ * support, self-equality, the uncalibrated/ICC-compatible/PS-2 flags, the
+ * ITU-R BT.2100 transfer-function flag, the rendering intent and the
+ * type ID, with the indexed colour table when there is one.
  *
  * The transcript is compared by api-parity.sh, first token as the label.
  *
@@ -32,6 +33,12 @@
 extern int CGColorSpaceGetType(CGColorSpaceRef); /* private SPI, not in headers */
 extern bool CGColorSpaceEqualToColorSpace(CGColorSpaceRef,
                                           CGColorSpaceRef); /* SPI */
+extern bool CGColorSpaceIsUncalibrated(CGColorSpaceRef); /* SPI */
+extern bool CGColorSpaceIsICCCompatible(CGColorSpaceRef); /* SPI */
+extern bool CGColorSpaceIsPSLevel2Compatible(CGColorSpaceRef); /* SPI */
+extern bool CGColorSpaceIgnoresIntent(CGColorSpaceRef); /* SPI */
+extern int CGColorSpaceGetRenderingIntent(CGColorSpaceRef); /* SPI */
+extern bool CGColorSpaceUsesITUR_2100TF(CGColorSpaceRef); /* SPI */
 
 /* The creation-date window, bytes 24..35, stamped by CGColorSpaceCreateLab. */
 #define ICC_DATE_OFF 24
@@ -145,14 +152,22 @@ static void probe(const char *label, CGColorSpaceRef cs)
     print_base(cs);
     printf(" icc ");
     print_icc(cs);
-    printf(" ext %d hdr %d pq %d hlg %d wide %d sup %d eq %d",
+    printf(" ext %d hdr %d pq %d hlg %d wide %d sup %d eq %d"
+           " uncal %d iccc %d ps2 %d itur %d intn %d ignt %d typeid %d",
            CGColorSpaceUsesExtendedRange(cs),
            CGColorSpaceIsHDR(cs),
            CGColorSpaceIsPQBased(cs),
            CGColorSpaceIsHLGBased(cs),
            CGColorSpaceIsWideGamutRGB(cs),
            CGColorSpaceSupportsOutput(cs),
-           CGColorSpaceEqualToColorSpace(cs, cs));
+           CGColorSpaceEqualToColorSpace(cs, cs),
+           CGColorSpaceIsUncalibrated(cs),
+           CGColorSpaceIsICCCompatible(cs),
+           CGColorSpaceIsPSLevel2Compatible(cs),
+           CGColorSpaceUsesITUR_2100TF(cs),
+           CGColorSpaceGetRenderingIntent(cs),
+           CGColorSpaceIgnoresIntent(cs),
+           (int)CGColorSpaceGetTypeID());
     print_table(cs);
     printf("\n");
 }
@@ -322,6 +337,73 @@ int main(int argc, char **argv)
         if (d)
             CFRelease(d);
         CGColorSpaceRelease(cs);
+    }
+
+    /* The same round trip on rebuilt profiles: linearized named and
+       calibrated spaces carry a profile that is not a built-in, so reopening
+       it must come back with no name. */
+    {
+        CGColorSpaceRef s2, lin, r;
+        CFDataRef d;
+
+        s2 = CGColorSpaceCreateWithName(CFStringCreateWithCString(
+            NULL, "kCGColorSpaceSRGB", kCFStringEncodingASCII));
+        if (s2) {
+            lin = CGColorSpaceCreateLinearized(s2);
+            d = lin ? CGColorSpaceCopyICCData(lin) : NULL;
+            r = d ? CGColorSpaceCreateWithICCData(d) : NULL;
+            probe("icc_srgb_lin", r);
+            if (r)
+                CGColorSpaceRelease(r);
+            if (d)
+                CFRelease(d);
+            if (lin)
+                CGColorSpaceRelease(lin);
+            CGColorSpaceRelease(s2);
+        }
+    }
+    {
+        CGColorSpaceRef lin, r;
+        CFDataRef d;
+
+        lin = CGColorSpaceCreateLinearized(cal_gray);
+        d = lin ? CGColorSpaceCopyICCData(lin) : NULL;
+        r = d ? CGColorSpaceCreateWithICCData(d) : NULL;
+        probe("icc_cal_lin", r);
+        if (r)
+            CGColorSpaceRelease(r);
+        if (d)
+            CFRelease(d);
+        if (lin)
+            CGColorSpaceRelease(lin);
+    }
+
+    /* Broken inputs: a stream too short to carry the 128-byte profile header
+       and an empty one both leave nothing to probe. */
+    if (srgb) {
+        CFDataRef bd = CGColorSpaceCopyICCData(srgb);
+        if (bd) {
+            size_t n = CFDataGetLength(bd);
+            CFDataRef t = CFDataCreate(kCFAllocatorDefault,
+                                       CFDataGetBytePtr(bd), n < 12 ? n : 12);
+            CGColorSpaceRef r = t ? CGColorSpaceCreateWithICCData(t) : NULL;
+
+            probe("icc_trunc", r);
+            if (r)
+                CGColorSpaceRelease(r);
+            if (t)
+                CFRelease(t);
+            CFRelease(bd);
+        }
+    }
+    {
+        CFDataRef ed = CFDataCreate(kCFAllocatorDefault, (const uint8_t *)"", 0);
+        cs = ed ? CGColorSpaceCreateWithICCData(ed) : NULL;
+        probe("icc_empty", cs);
+        if (cs)
+            CGColorSpaceRelease(cs);
+        if (ed)
+            CFRelease(ed);
     }
 
     /* Uncolored and colored pattern spaces. */
