@@ -44,15 +44,16 @@ FW_CFG      := src/Info.plist src/version.plist src/CodeResources
 # Listed twice on purpose: FW_HDRS holds the bare names for the install and
 # copy loops, FW_HDR_DEPS the same headers as make prerequisites.  Deriving
 # one from the other would need addprefix/patsubst, which bmake lacks.
-FW_HDRS     := CGBase.h CGGeometry.h CGAffineTransform.h CGColorSpace.h CoreGraphics.h
+FW_HDRS     := CGBase.h CGGeometry.h CGAffineTransform.h CGColorSpace.h CGDataProvider.h CoreGraphics.h
 FW_HDR_DEPS := src/CGBase.h src/CGGeometry.h src/CGAffineTransform.h \
-               src/CGColorSpace.h src/CoreGraphics.h src/CGSPI.h
+               src/CGColorSpace.h src/CGDataProvider.h src/CoreGraphics.h src/CGSPI.h
 
 PREFIX  ?= /usr/local
 DESTDIR ?=
 
 OBJS := $(OBJDIR)/CGGeometry.o $(OBJDIR)/CGAffineTransform.o \
-        $(OBJDIR)/CGColorSpace.o $(OBJDIR)/CGMD5.o $(OBJDIR)/CGError.o
+        $(OBJDIR)/CGColorSpace.o $(OBJDIR)/CGDataProvider.o \
+        $(OBJDIR)/CGMD5.o $(OBJDIR)/CGError.o
 
 all: $(FW_DYLIB)
 
@@ -116,6 +117,10 @@ $(OBJDIR)/CGAffineTransform.o: src/CGAffineTransform.c src/CGAffineTransform.h s
 $(OBJDIR)/CGColorSpace.o: src/CGColorSpace.c src/CGColorSpace.h src/CGAffineTransform.h src/CGBase.h src/CGInternal.h src/CGSPI.h
 	@mkdir -p $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ src/CGColorSpace.c
+
+$(OBJDIR)/CGDataProvider.o: src/CGDataProvider.c src/CGDataProvider.h src/CGBase.h src/CGInternal.h
+	@mkdir -p $(OBJDIR)
+	$(CC) $(CFLAGS) -c -o $@ src/CGDataProvider.c
 
 $(OBJDIR)/CGMD5.o: src/CGMD5.c src/CGInternal.h src/CGBase.h
 	@mkdir -p $(OBJDIR)

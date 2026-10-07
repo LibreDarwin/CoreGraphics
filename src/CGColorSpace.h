@@ -10,25 +10,31 @@
    Scope of this header.  Apple's CGColorSpace.h declares 35 functions and
    the framework exports 100 CGColorSpace* symbols in total (the extra 65
    have no public declaration and are declared in CGSPI.h).  This header
-   covers the part of the surface that needs no ICC profile:
+   covers the part of the surface that needs no ICC profile, plus the
+   ICCFromData constructor:
 
      - the three device spaces, which are immortal singletons,
      - pattern spaces, which are reference-counted and own their base,
      - the calibrated spaces -- gray, RGB and Lab -- which synthesise their
        ICC profile,
-     - the accessors over those, and
-     - the built-in name/ID table.
+     - the accessors over those,
+     - the built-in name/ID table, and
+     - CGColorSpaceCreateICCBased and CGColorSpaceCreateWithICCData, which
+       reopen profile bytes the caller already holds.
 
    Deliberately absent, because each of these either embeds a profile this
    step cannot reproduce or needs a byte-exact ICC encoder:
 
      - CreateLinearized, CreateExtended and their Extended variants,
-     - CreateICCBased, CreateWithICCData, CreateWithICCProfile,
-       CreateWithColorSyncProfile, CreateWithURL, CreatePlatformProfile,
+     - CreateWithICCProfile, CreateWithColorSyncProfile, CreateWithURL,
+       CreatePlatformProfile, CreateCopy, CreateCopyWithStandardRange,
+       CopyPropertyList, CreateWithPropertyList,
      - CreateWithID, and CreateWithName for all but ten of the fifty name
        constants: the forty it does accept are assembled here, four of the
        ten resolve on Apple to embedded profiles this step cannot emit,
        and six Apple refuses as well.
+     - kCGColorSpaceExtendedRange, which the absent property-list and
+       platform constructors read.
 
    The three calibrated spaces do synthesise a profile, and the size varies
    with the shape of the request: 380 bytes for a calibrated gray, 416 to 528
@@ -42,6 +48,7 @@
 #define CGCOLORSPACE_H_
 
 #include "CGBase.h"
+#include "CGDataProvider.h"
 #include <CoreFoundation/CFData.h>
 #include <CoreFoundation/CFString.h>
 
@@ -488,6 +495,26 @@ CG_EXTERN CFDataRef __nullable CGColorSpaceCopyICCProfile(
    the data, or names a colour space Apple does not hand back a model for. */
 CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateWithICCData(
     CFDataRef cg_nullable data);
+
+/* Build a color space from an ICC profile supplied through a data provider.
+
+   `nComponents' must be 1, 3 or 4 and agree both with `alternate's'
+   component count, when one is given, and with the component count the
+   profile describes; otherwise NULL is returned.  `range' names the
+   gamut the caller declares for the profile, `nComponents' pairs of
+   (low, high) bounds.  When the first `nComponents' values of `range'
+   match exactly the profile's intrinsic range -- 0..1 for a gray, RGB or
+   CMYK profile, (0,100)(-128,127)(-128,127) for a Lab one and
+   (-inf,inf) per component for an XYZ profile -- the space is built from
+   the profile bytes and behaves exactly as if the same bytes had been
+   passed to CGColorSpaceCreateWithICCData.  When they do not, or when the
+   profile cannot be decoded, `alternate' is returned instead, retained;
+   with no usable alternate the call returns NULL.  A provider with no data
+   to hand over fails the same way. */
+CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateICCBased(
+    size_t nComponents, const CGFloat *cg_nullable range,
+    CGDataProviderRef cg_nullable profile,
+    CGColorSpaceRef cg_nullable alternate);
 
 /* Return the number of entries in the color table of `space'.  This is zero
    unless `space' is an indexed color space. */

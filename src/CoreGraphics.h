@@ -10,5 +10,6 @@
 #include <CoreGraphics/CGGeometry.h>
 #include <CoreGraphics/CGAffineTransform.h>
 #include <CoreGraphics/CGColorSpace.h>
+#include <CoreGraphics/CGDataProvider.h>
 
 #endif /* COREGRAPHICS_H_ */

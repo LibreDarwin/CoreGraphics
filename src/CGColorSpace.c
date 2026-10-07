@@ -10146,7 +10146,8 @@ static const char *CGColorSpaceICCRecognizedNameFor(
     static const char *const extra[] = {
         "kCGColorSpaceGenericGray",
         "kCGColorSpaceGenericRGB",
-        "kCGColorSpaceGenericRGBLinear"
+        "kCGColorSpaceGenericRGBLinear",
+        "kCGColorSpaceGenericCMYK"
     };
     /* The linearized twins of a named space are never recognised again from
        their bytes: reopening the profile Apple hands out for
@@ -10366,6 +10367,99 @@ CGColorSpaceRef CGColorSpaceCreateWithICCData(CFDataRef data)
     s->profile = copy;
     s->profileLen = stored;
     return s;
+}
+
+/* Whether the first `s->ncomp' values of `range' equal the profile's
+   intrinsic gamut, exactly.  The intrinsic gamut is fixed by the profile's
+   data colour space signature: 0..1 for a gray, RGB or CMYK profile, the
+   CIE-Lab A and B extents for a Lab one, and the full real line for an XYZ
+   one.  This is what CreateICCBased uses to decide whether the caller's
+   declared range is the profile's own.  The comparison is exact, element by
+   element: Apple's gate is an FLAGged equality, so a caller passing a
+   double that merely rounds to a bound -- 1.0 where the intrinsic bound is
+   exactly 1, say -- falls through to the alternate. */
+static bool CGColorSpaceICCRangeMatches(struct CGColorSpace *s,
+                                        const CGFloat *range)
+{
+    static const CGFloat labRange[6] = { 0, 100, -128, 127, -128, 127 };
+    static const CGFloat xyzBound = INFINITY;
+    const unsigned char *cc = s->profile + CGICCColorSpaceOffset;
+    size_t i, n = s->ncomp;
+
+    if (memcmp(cc, "Lab ", 4) == 0) {
+        for (i = 0; i < n; i++)
+            if (range[i] != labRange[i])
+                return false;
+        return true;
+    }
+    if (memcmp(cc, "XYZ ", 4) == 0) {
+        for (i = 0; i < n; i++)
+            if (range[i] != (i & 1 ? xyzBound : -xyzBound))
+                return false;
+        return true;
+    }
+    for (i = 0; i < n; i++)
+        if (range[i] != (i & 1 ? 1.0 : 0.0))
+            return false;
+    return true;
+}
+
+/* Build a space from a profile handed over through a data provider, with a
+   caller-declared range and an alternate space for the values the range
+   does not describe.
+
+   The shape of the call is a ladder of gates, and each failure past the
+   first two lands on the alternate:
+
+     - `n' must be 1, 3 or 4; anything else is refused outright.
+     - `alternate', when present, must have `n' components.  This is the
+       one failure that gives up completely: the alternate is the safety
+       net, and a net with the wrong number of components is not usable, so
+       nothing is returned with it in place unless the Ladder of gates...
+     - the provider's bytes must decode as a profile -- they are run
+       through the very same validation as CGColorSpaceCreateWithICCData --
+       and the resulting space must have `n' components (a profile whose
+       data colour space does not match the declared component count is a
+       mismatch, not a decode error).
+     - the first `n' doubles of `range' must equal the profile's intrinsic
+       gamut (see CGColorSpaceICCRangeMatches).
+
+   Each of the last two failures returns the alternate, retained, or NULL
+   when none was given.  So CGColorSpaceCreateICCBased(n, range, profile,
+   NULL) hands back the profile's space exactly when the caller's range is
+   precisely the profile's own, and NULL otherwise -- never a space whose
+   gamut silently disagrees with the one the caller declared.  A caller who
+   wants the declared range respected no matter what passes an alternate and
+   gets it back, unchanged, whenever the profile does not match.  The
+   alternate is not stored on the returned space: nothing in the accessor
+   surface reports it, and the returned space is byte-for-byte what
+   CGColorSpaceCreateWithICCData would have built from the same bytes. */
+CGColorSpaceRef CGColorSpaceCreateICCBased(size_t n, const CGFloat *range,
+                                           CGDataProviderRef profile,
+                                           CGColorSpaceRef alternate)
+{
+    struct CGColorSpace *alt = alternate;
+    struct CGColorSpace *s;
+    CFDataRef data;
+
+    if (n > 4 || (((size_t)1 << n) & 0x1A) == 0)
+        return NULL;
+    if (alt != NULL && alt->ncomp != n)
+        return NULL;
+    data = CGDataProviderCopyData(profile);
+    if (data) {
+        s = (struct CGColorSpace *)CGColorSpaceCreateWithICCData(data);
+        CFRelease(data);
+    } else {
+        s = NULL;
+    }
+    if (s && s->ncomp == n && CGColorSpaceICCRangeMatches(s, range))
+        return s;
+    if (s)
+        CGColorSpaceRelease(s);
+    if (alt)
+        return CGColorSpaceRetain(alternate);
+    return NULL;
 }
 
 /* Reference counting. */

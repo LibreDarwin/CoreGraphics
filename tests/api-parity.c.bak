@@ -396,6 +396,14 @@ int main(int argc, char **argv)
             CFRelease(bd);
         }
     }
+    probe("icc_trunc", r);
+            if (r)
+                CGColorSpaceRelease(r);
+            if (t)
+                CFRelease(t);
+            CFRelease(bd);
+        }
+    }
     {
         CFDataRef ed = CFDataCreate(kCFAllocatorDefault, (const uint8_t *)"", 0);
         cs = ed ? CGColorSpaceCreateWithICCData(ed) : NULL;
