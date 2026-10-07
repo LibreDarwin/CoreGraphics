@@ -91,7 +91,7 @@ $(FW_DYLIB): $(OBJS) $(FW_CFG) $(FW_HDR_DEPS)
 	$(CC) $(CFLAGS) -dynamiclib \
 		-Wl,-install_name,@rpath/CoreGraphics.framework/Versions/A/CoreGraphics \
 		-Wl,-compatibility_version,64.0.0 -Wl,-current_version,1965.5.1 \
-		-o $(FW_DYLIB) $(OBJS) -framework CoreFoundation
+		-o $(FW_DYLIB) $(OBJS) -framework CoreFoundation -weak_framework ColorSync
 	cp src/Info.plist $(FW_ID)/Versions/A/Resources/
 	cp src/version.plist $(FW_ID)/Versions/A/Resources/
 	ln -sfn A $(FW_ID)/Versions/Current

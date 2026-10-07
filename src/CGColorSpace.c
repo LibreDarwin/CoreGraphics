@@ -1,5 +1,6 @@
 
 #include <CoreFoundation/CoreFoundation.h>
+#include <ColorSync/ColorSync.h>
 
 /* CoreGraphics - CGColorSpace.c
    Copyright (C) 2026, LibreDarwin
@@ -11056,9 +11057,13 @@ CGColorSpaceRef CGColorSpaceCreateCopyWithStandardRange(CGColorSpaceRef space)
 
 CGColorSpaceRef CGColorSpaceCreateWithColorSyncProfile(ColorSyncProfileRef profile, CFDictionaryRef options)
 {
-    (void)profile;
+    if (!profile)
+        return NULL;
     (void)options;
-    return NULL;
+    CFDataRef d = ColorSyncProfileCopyData(profile, NULL);
+    CGColorSpaceRef cs = d ? CGColorSpaceCreateWithICCData(d) : NULL;
+    if (d) CFRelease(d);
+    return cs;
 }
 
 CGColorSpaceRef CGColorSpaceCreateWithICCProfile(CFDataRef data)
