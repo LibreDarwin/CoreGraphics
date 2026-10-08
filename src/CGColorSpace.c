@@ -11197,3 +11197,5 @@ const CFStringRef kCGColorSpaceGenericHDR = CFSTR("kCGColorSpaceGenericHDR");
 const CFStringRef kCGColorSpaceUncalibratedGray = CFSTR("kCGColorSpaceUncalibratedGray");
 const CFStringRef kCGColorSpacePerceptualStandardRGB = CFSTR("kCGColorSpacePerceptualStandardRGB");
 const CFStringRef kCGColorSpaceAttachment_CICP_data = CFSTR("kCGColorSpaceAttachment_CICP_data");
+
+CF_RETURNS_RETAINED ColorSyncProfileRef CGColorSpaceGetColorSyncProfile(CGColorSpaceRef space) { (void)space; return NULL; }
