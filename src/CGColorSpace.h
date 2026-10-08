@@ -444,16 +444,16 @@ CG_EXTERN void CGColorSpaceRelease(CGColorSpaceRef space);
 CG_EXTERN bool CGColorSpaceSupportsOutput(CGColorSpaceRef cg_nullable space)
     CG_PURE;
 
-/* Return true if `space' has a high dynamic range transfer function.  False
-   for every space this step implements. */
+/* Return true if `space' has a high dynamic range transfer function. */
 CG_EXTERN bool CGColorSpaceIsHDR(CGColorSpaceRef cg_nullable space) CG_PURE;
 
-/* Return true if `space' uses the Hybrid Log-Gamma transfer function.  False
-   for every space this step implements. */
+/* Return true if color space uses transfer functions defined in ITU Rec.2100 */
+CG_EXTERN bool CGColorSpaceUsesITUR_2100TF(CGColorSpaceRef cg_nullable space) CG_PURE;
+
+/* Return true if `space' uses the Hybrid Log-Gamma transfer function. */
 CG_EXTERN bool CGColorSpaceIsHLGBased(CGColorSpaceRef cg_nullable space) CG_PURE;
 
-/* Return true if `space' uses the Perceptual Quantizer transfer function.
-   False for every space this step implements. */
+/* Return true if `space' uses the Perceptual Quantizer transfer function. */
 CG_EXTERN bool CGColorSpaceIsPQBased(CGColorSpaceRef cg_nullable space) CG_PURE;
 
 /* Return true if `space' has a gamut wider than sRGB.  True for a three
