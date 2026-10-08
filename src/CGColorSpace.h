@@ -598,3 +598,23 @@ CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateWithICCProfile(
 
 CG_EXTERN CGColorSpaceRef __nullable CGColorSpaceCreateWithPlatformColorSpace(
     const void * cg_nullable ref);
+
+CG_EXTERN const CFStringRef kCGColorSpaceUncalibratedCMYK;
+
+CG_EXTERN const CFStringRef kCGColorSpaceGenericExtendedLinearRGB;
+
+CG_EXTERN const CFStringRef kCGColorSpaceDisplayP3_709OETF;
+
+CG_EXTERN const CFStringRef kCGColorSpaceDisplayRGB;
+
+CG_EXTERN const CFStringRef kCGColorSpaceUncalibratedRGB;
+
+CG_EXTERN const CFStringRef kCGColorSpace_Attachment_ICC_Data;
+
+CG_EXTERN const CFStringRef kCGColorSpaceGenericHDR;
+
+CG_EXTERN const CFStringRef kCGColorSpaceUncalibratedGray;
+
+CG_EXTERN const CFStringRef kCGColorSpacePerceptualStandardRGB;
+
+CG_EXTERN const CFStringRef kCGColorSpaceAttachment_CICP_data;

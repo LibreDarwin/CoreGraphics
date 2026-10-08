@@ -40,6 +40,10 @@
 
 #include "CGColorSpace.h"
 #include "CGSPI.h"
+
+#ifndef IOSurfaceRef
+typedef struct __IOSurface *IOSurfaceRef;
+#endif
 #include "CGInternal.h"
 
 #include <stdlib.h>
@@ -11137,3 +11141,59 @@ CGColorSpaceRef CGColorSpaceCreateWithPlatformColorSpace(const void *ref)
     (void)ref;
     return NULL;
 }
+
+/* Minimal stubs for additional SDK symbols */
+CF_RETURNS_RETAINED CFTypeRef CGColorSpaceAttachToIOSurface(CGColorSpaceRef space, IOSurfaceRef surface) { (void)space; (void)surface; return NULL; }
+bool CGColorSpaceGetCICPInfo(CGColorSpaceRef space, void *info) { (void)space; (void)info; return false; }
+CF_RETURNS_RETAINED CFDataRef CGColorSpaceCopyColorTable(CGColorSpaceRef space) { (void)space; return NULL; }
+bool CGColorSpaceGetLabData(CGColorSpaceRef space, CGFloat *blackPoint, CGFloat *whitePoint, CGFloat *range) { (void)space; (void)blackPoint; (void)whitePoint; (void)range; return false; }
+CF_RETURNS_RETAINED CFTypeRef CGColorSpaceCopyFlexGTCInfo(CGColorSpaceRef space) { (void)space; return NULL; }
+bool CGColorSpaceGetConversionMatrix(CGColorSpaceRef space, CGAffineTransform *matrix) { (void)space; (void)matrix; return false; }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCreatePQBasedCopy(CGColorSpaceRef space) { (void)space; return NULL; }
+CF_RETURNS_RETAINED CFTypeRef CGColorSpaceGetDescriptor(CGColorSpaceRef space) { (void)space; return NULL; }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCreateSystemDefaultCMYK(void) { return CGColorSpaceCreateDeviceCMYK(); }
+bool CGColorSpaceICCGetRange(CGColorSpaceRef space, CGColorSpaceModel model, size_t *rangeCount, CGFloat *ranges) { (void)space; (void)model; (void)rangeCount; (void)ranges; return false; }
+bool CGColorSpaceGetTintTransform(CGColorSpaceRef space, CGAffineTransform *transform) { (void)space; (void)transform; return false; }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCreateWithID(uint32_t id) { (void)id; return NULL; }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCreateFlexGTCProxy(CGColorSpaceRef space, void *info) { (void)space; (void)info; return NULL; }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCreateConversionCurve(CGColorSpaceRef space, void *curve) { (void)space; (void)curve; return NULL; }
+void CGColorSpaceStreamPSDefinition(CGColorSpaceRef space, void *consumer) { (void)space; (void)consumer; }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCopyFromIOSurface(IOSurfaceRef surface) { (void)surface; return NULL; }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCreateDisplayGray(int id) { (void)id; return NULL; }
+bool CGColorSpaceGetHeadroomInfo(CGColorSpaceRef space, void *info) { (void)space; (void)info; return false; }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCreateDisplayRGB(int id) { (void)id; return NULL; }
+CF_RETURNS_RETAINED CFStringRef CGColorSpaceCopyICCProfileDescription(CGColorSpaceRef space) { return CGColorSpaceCopyName(space); }
+CF_RETURNS_RETAINED CFDataRef CGColorSpaceICCGetPlatformProfile(CGColorSpaceRef space) { (void)space; return NULL; }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCreateSystemDefaultGray(void) { return CGColorSpaceCreateDeviceGray(); }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCreateFromCICP(const void *cicp) { (void)cicp; return NULL; }
+CF_RETURNS_RETAINED ColorSyncProfileRef CGColorSpaceCopyColorSyncProfile(CGColorSpaceRef space) { (void)space; return NULL; }
+bool CGColorSpaceCopyDefaultColor(CGColorSpaceRef space, CGFloat *color) { (void)space; (void)color; return false; }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCreateDeviceN(const CFArrayRef names, const CGFloat *vals, CGColorSpaceRef base, const void *table) { (void)names; (void)vals; (void)base; (void)table; return NULL; }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCreateHLGBasedCopy(CGColorSpaceRef space) { (void)space; return NULL; }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCreateCopyWithPQTransferFunctions(CGColorSpaceRef space) { (void)space; return NULL; }
+bool CGColorSpaceGetCalibratedRGBData(CGColorSpaceRef space, CGFloat *white, CGFloat *black, CGFloat *gamma, CGFloat *matrix) { (void)space; (void)white; (void)black; (void)gamma; (void)matrix; return false; }
+bool CGColorSpaceContainsFlexGTCInfo(CGColorSpaceRef space) { (void)space; return false; }
+CF_RETURNS_RETAINED CFDictionaryRef CGColorSpaceGetColorants(CGColorSpaceRef space) { (void)space; return NULL; }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCreateFromAttachments(CFDictionaryRef dict) { (void)dict; return NULL; }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCreateWithURL(CFURLRef url) { (void)url; return NULL; }
+CF_RETURNS_RETAINED CFStringRef CGColorSpaceCopyICCProfileASCIIDescriptionString(CGColorSpaceRef space) { return CGColorSpaceCopyName(space); }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCreateSystemDefaultRGB(void) { return CGColorSpaceCreateDeviceRGB(); }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCreatePlatformProfile(CFDataRef data) { return data ? CGColorSpaceCreateWithICCData(data) : NULL; }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCreateDisplayRGBWithID(uint32_t id, CGFloat white, CGFloat black, CGFloat *gamma, CGFloat *matrix) { (void)id; (void)white; (void)black; (void)gamma; (void)matrix; return NULL; }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCreateDisplayColorSpaceWithID(uint32_t id) { (void)id; return NULL; }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceProfileSetsGetDestinationProfile(CFArrayRef sets, int intent, CFDictionaryRef opts) { (void)sets; (void)intent; (void)opts; return NULL; }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceConcatenate(CFArrayRef spaces) { (void)spaces; return NULL; }
+bool CGColorSpaceGetCalibratedGrayData(CGColorSpaceRef space, CGFloat *white, CGFloat *black, CGFloat *gamma) { (void)space; (void)white; (void)black; (void)gamma; return false; }
+CF_RETURNS_RETAINED CGColorSpaceRef CGColorSpaceCreateCopyWithNativeGamma(CGColorSpaceRef space) { return space ? CGColorSpaceRetain(space) : NULL; }
+void CGColorSpaceDumpPropertyList(CGColorSpaceRef space, void *consumer) { (void)space; (void)consumer; }
+
+const CFStringRef kCGColorSpaceUncalibratedCMYK = CFSTR("kCGColorSpaceUncalibratedCMYK");
+const CFStringRef kCGColorSpaceGenericExtendedLinearRGB = CFSTR("kCGColorSpaceGenericExtendedLinearRGB");
+const CFStringRef kCGColorSpaceDisplayP3_709OETF = CFSTR("kCGColorSpaceDisplayP3_709OETF");
+const CFStringRef kCGColorSpaceDisplayRGB = CFSTR("kCGColorSpaceDisplayRGB");
+const CFStringRef kCGColorSpaceUncalibratedRGB = CFSTR("kCGColorSpaceUncalibratedRGB");
+const CFStringRef kCGColorSpace_Attachment_ICC_Data = CFSTR("kCGColorSpace_Attachment_ICC_Data");
+const CFStringRef kCGColorSpaceGenericHDR = CFSTR("kCGColorSpaceGenericHDR");
+const CFStringRef kCGColorSpaceUncalibratedGray = CFSTR("kCGColorSpaceUncalibratedGray");
+const CFStringRef kCGColorSpacePerceptualStandardRGB = CFSTR("kCGColorSpacePerceptualStandardRGB");
+const CFStringRef kCGColorSpaceAttachment_CICP_data = CFSTR("kCGColorSpaceAttachment_CICP_data");
