@@ -534,6 +534,46 @@ CF_ASSUME_NONNULL_END
 
 /* Extended range marker (CFStringRef). */
 CG_EXTERN const CFStringRef kCGColorSpaceExtendedRange;
+CG_EXTERN const CFStringRef kCGColorSpaceACESCGLinear;
+CG_EXTERN const CFStringRef kCGColorSpaceAdobeRGB1998;
+CG_EXTERN const CFStringRef kCGColorSpaceCoreMedia709;
+CG_EXTERN const CFStringRef kCGColorSpaceDCIP3;
+CG_EXTERN const CFStringRef kCGColorSpaceDisplayP3;
+CG_EXTERN const CFStringRef kCGColorSpaceDisplayP3_HLG;
+CG_EXTERN const CFStringRef kCGColorSpaceDisplayP3_PQ;
+CG_EXTERN const CFStringRef kCGColorSpaceDisplayP3_PQ_EOTF;
+CG_EXTERN const CFStringRef kCGColorSpaceExtendedDisplayP3;
+CG_EXTERN const CFStringRef kCGColorSpaceExtendedGray;
+CG_EXTERN const CFStringRef kCGColorSpaceExtendedITUR_2020;
+CG_EXTERN const CFStringRef kCGColorSpaceExtendedLinearDisplayP3;
+CG_EXTERN const CFStringRef kCGColorSpaceExtendedLinearGray;
+CG_EXTERN const CFStringRef kCGColorSpaceExtendedLinearITUR_2020;
+CG_EXTERN const CFStringRef kCGColorSpaceExtendedLinearSRGB;
+CG_EXTERN const CFStringRef kCGColorSpaceExtendedSRGB;
+CG_EXTERN const CFStringRef kCGColorSpaceGenericCMYK;
+CG_EXTERN const CFStringRef kCGColorSpaceGenericGray;
+CG_EXTERN const CFStringRef kCGColorSpaceGenericGrayGamma2_2;
+CG_EXTERN const CFStringRef kCGColorSpaceGenericLab;
+CG_EXTERN const CFStringRef kCGColorSpaceGenericRGB;
+CG_EXTERN const CFStringRef kCGColorSpaceGenericRGBLinear;
+CG_EXTERN const CFStringRef kCGColorSpaceGenericXYZ;
+CG_EXTERN const CFStringRef kCGColorSpaceITUR_2020;
+CG_EXTERN const CFStringRef kCGColorSpaceITUR_2020_HLG;
+CG_EXTERN const CFStringRef kCGColorSpaceITUR_2020_PQ;
+CG_EXTERN const CFStringRef kCGColorSpaceITUR_2020_PQ_EOTF;
+CG_EXTERN const CFStringRef kCGColorSpaceITUR_2020_sRGBGamma;
+CG_EXTERN const CFStringRef kCGColorSpaceITUR_2100_HLG;
+CG_EXTERN const CFStringRef kCGColorSpaceITUR_2100_PQ;
+CG_EXTERN const CFStringRef kCGColorSpaceITUR_709;
+CG_EXTERN const CFStringRef kCGColorSpaceITUR_709_HLG;
+CG_EXTERN const CFStringRef kCGColorSpaceITUR_709_PQ;
+CG_EXTERN const CFStringRef kCGColorSpaceLinearDisplayP3;
+CG_EXTERN const CFStringRef kCGColorSpaceLinearGray;
+CG_EXTERN const CFStringRef kCGColorSpaceLinearITUR_2020;
+CG_EXTERN const CFStringRef kCGColorSpaceLinearSRGB;
+CG_EXTERN const CFStringRef kCGColorSpaceROMMRGB;
+CG_EXTERN const CFStringRef kCGColorSpaceSRGB;
+
 
 #ifdef __has_include
 # if __has_include(<ColorSync/ColorSync.h>)

@@ -371,6 +371,46 @@ static bool CGColorSpaceNameEqualsASCII(CFStringRef name, const char *ascii)
 }
 
 const CFStringRef kCGColorSpaceExtendedRange = CFSTR("kCGColorSpaceExtendedRange");
+const CFStringRef kCGColorSpaceACESCGLinear = CFSTR("kCGColorSpaceACESCGLinear");
+const CFStringRef kCGColorSpaceAdobeRGB1998 = CFSTR("kCGColorSpaceAdobeRGB1998");
+const CFStringRef kCGColorSpaceCoreMedia709 = CFSTR("kCGColorSpaceCoreMedia709");
+const CFStringRef kCGColorSpaceDCIP3 = CFSTR("kCGColorSpaceDCIP3");
+const CFStringRef kCGColorSpaceDisplayP3 = CFSTR("kCGColorSpaceDisplayP3");
+const CFStringRef kCGColorSpaceDisplayP3_HLG = CFSTR("kCGColorSpaceDisplayP3_HLG");
+const CFStringRef kCGColorSpaceDisplayP3_PQ = CFSTR("kCGColorSpaceDisplayP3_PQ");
+const CFStringRef kCGColorSpaceDisplayP3_PQ_EOTF = CFSTR("kCGColorSpaceDisplayP3_PQ_EOTF");
+const CFStringRef kCGColorSpaceExtendedDisplayP3 = CFSTR("kCGColorSpaceExtendedDisplayP3");
+const CFStringRef kCGColorSpaceExtendedGray = CFSTR("kCGColorSpaceExtendedGray");
+const CFStringRef kCGColorSpaceExtendedITUR_2020 = CFSTR("kCGColorSpaceExtendedITUR_2020");
+const CFStringRef kCGColorSpaceExtendedLinearDisplayP3 = CFSTR("kCGColorSpaceExtendedLinearDisplayP3");
+const CFStringRef kCGColorSpaceExtendedLinearGray = CFSTR("kCGColorSpaceExtendedLinearGray");
+const CFStringRef kCGColorSpaceExtendedLinearITUR_2020 = CFSTR("kCGColorSpaceExtendedLinearITUR_2020");
+const CFStringRef kCGColorSpaceExtendedLinearSRGB = CFSTR("kCGColorSpaceExtendedLinearSRGB");
+const CFStringRef kCGColorSpaceExtendedSRGB = CFSTR("kCGColorSpaceExtendedSRGB");
+const CFStringRef kCGColorSpaceGenericCMYK = CFSTR("kCGColorSpaceGenericCMYK");
+const CFStringRef kCGColorSpaceGenericGray = CFSTR("kCGColorSpaceGenericGray");
+const CFStringRef kCGColorSpaceGenericGrayGamma2_2 = CFSTR("kCGColorSpaceGenericGrayGamma2_2");
+const CFStringRef kCGColorSpaceGenericLab = CFSTR("kCGColorSpaceGenericLab");
+const CFStringRef kCGColorSpaceGenericRGB = CFSTR("kCGColorSpaceGenericRGB");
+const CFStringRef kCGColorSpaceGenericRGBLinear = CFSTR("kCGColorSpaceGenericRGBLinear");
+const CFStringRef kCGColorSpaceGenericXYZ = CFSTR("kCGColorSpaceGenericXYZ");
+const CFStringRef kCGColorSpaceITUR_2020 = CFSTR("kCGColorSpaceITUR_2020");
+const CFStringRef kCGColorSpaceITUR_2020_HLG = CFSTR("kCGColorSpaceITUR_2020_HLG");
+const CFStringRef kCGColorSpaceITUR_2020_PQ = CFSTR("kCGColorSpaceITUR_2020_PQ");
+const CFStringRef kCGColorSpaceITUR_2020_PQ_EOTF = CFSTR("kCGColorSpaceITUR_2020_PQ_EOTF");
+const CFStringRef kCGColorSpaceITUR_2020_sRGBGamma = CFSTR("kCGColorSpaceITUR_2020_sRGBGamma");
+const CFStringRef kCGColorSpaceITUR_2100_HLG = CFSTR("kCGColorSpaceITUR_2100_HLG");
+const CFStringRef kCGColorSpaceITUR_2100_PQ = CFSTR("kCGColorSpaceITUR_2100_PQ");
+const CFStringRef kCGColorSpaceITUR_709 = CFSTR("kCGColorSpaceITUR_709");
+const CFStringRef kCGColorSpaceITUR_709_HLG = CFSTR("kCGColorSpaceITUR_709_HLG");
+const CFStringRef kCGColorSpaceITUR_709_PQ = CFSTR("kCGColorSpaceITUR_709_PQ");
+const CFStringRef kCGColorSpaceLinearDisplayP3 = CFSTR("kCGColorSpaceLinearDisplayP3");
+const CFStringRef kCGColorSpaceLinearGray = CFSTR("kCGColorSpaceLinearGray");
+const CFStringRef kCGColorSpaceLinearITUR_2020 = CFSTR("kCGColorSpaceLinearITUR_2020");
+const CFStringRef kCGColorSpaceLinearSRGB = CFSTR("kCGColorSpaceLinearSRGB");
+const CFStringRef kCGColorSpaceROMMRGB = CFSTR("kCGColorSpaceROMMRGB");
+const CFStringRef kCGColorSpaceSRGB = CFSTR("kCGColorSpaceSRGB");
+
 
 /* The space's name, or NULL.
 
