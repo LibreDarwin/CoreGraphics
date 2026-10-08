@@ -370,6 +370,8 @@ static bool CGColorSpaceNameEqualsASCII(CFStringRef name, const char *ascii)
     return memcmp(buf, ascii, n) == 0;
 }
 
+const CFStringRef kCGColorSpaceExtendedRange = CFSTR("kCGColorSpaceExtendedRange");
+
 /* The space's name, or NULL.
 
    These are CFSTR constants rather than strings built per call, because that
@@ -11048,10 +11050,27 @@ CGColorSpaceRef CGColorSpaceCreateWithPropertyList(CFPropertyListRef plist)
 
 CGColorSpaceRef CGColorSpaceCreateCopyWithStandardRange(CGColorSpaceRef space)
 {
-    if (space == NULL)
+    struct CGColorSpace *s = space;
+    if (s == NULL)
         return NULL;
-    /* For now, return a retained copy as-is; full semantics per space type can be refined later if needed. */
-    return CGColorSpaceRetain(space);
+    if (s->extended && s->name) {
+        const char *std = NULL;
+        if (strcmp(s->name, "kCGColorSpaceExtendedGray") == 0)
+            std = "kCGColorSpaceGenericGrayGamma2_2";
+        else if (strcmp(s->name, "kCGColorSpaceExtendedSRGB") == 0)
+            std = "kCGColorSpaceSRGB";
+        else if (strcmp(s->name, "kCGColorSpaceExtendedLinearGray") == 0)
+            std = "kCGColorSpaceGenericGray";
+        else if (strcmp(s->name, "kCGColorSpaceExtendedLinearSRGB") == 0)
+            std = "kCGColorSpaceLinearSRGB";
+        if (std) {
+            CFStringRef nm = CFStringCreateWithCString(kCFAllocatorDefault, std, kCFStringEncodingASCII);
+            CGColorSpaceRef cs = nm ? CGColorSpaceCreateWithName(nm) : NULL;
+            if (nm) CFRelease(nm);
+            return cs;
+        }
+    }
+    return CGColorSpaceRetain(s);
 }
 
 
